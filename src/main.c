@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include <errno.h>
 #include <time.h>
 #include "graph.h"
@@ -42,50 +43,125 @@ int main(const int argc, char** argv) {
     printf("\n");
     graph_print_stats(g);
 
-    /* Run optimized version */
-    printf("\n=== Running Optimized Version ===\n");
+    /* Run Union-Find (optimal) */
+    printf("\n=== Running Union-Find (Optimal) ===\n");
 
     clock_t start = clock();
-    CCResult* result = label_propagation_min(g);
+    CCResult* result_uf = union_find_cc(g);
     clock_t end = clock();
 
-    if (result == NULL) {
-        fprintf(stderr, "Error: Optimized algorithm failed\n");
+    if (result_uf == NULL) {
+        fprintf(stderr, "Error: Union-Find algorithm failed\n");
+        graph_destroy(g);
+        return EXIT_FAILURE;
+    }
+
+    const double elapsed_uf = (double)(end - start) / CLOCKS_PER_SEC;
+    printf("Union-Find completed in %.3f seconds\n", elapsed_uf);
+    cc_result_print_stats(result_uf, g);
+
+    /* Run Union-Find WITHOUT restrict (for comparison) */
+    printf("\n=== Running Union-Find (No Restrict) ===\n");
+
+    start = clock();
+    CCResult* result_uf_no_restrict = union_find_cc_no_restrict(g);
+    end = clock();
+
+    if (result_uf_no_restrict == NULL) {
+        fprintf(stderr, "Error: Union-Find (no restrict) algorithm failed\n");
+        cc_result_destroy(result_uf);
+        graph_destroy(g);
+        return EXIT_FAILURE;
+    }
+
+    const double elapsed_uf_no_restrict = (double)(end - start) / CLOCKS_PER_SEC;
+    printf("Union-Find (no restrict) completed in %.3f seconds\n", elapsed_uf_no_restrict);
+    cc_result_print_stats(result_uf_no_restrict, g);
+
+    /* Run optimized label propagation */
+    printf("\n=== Running Label Propagation (Optimized) ===\n");
+
+    start = clock();
+    CCResult* result_opt = label_propagation_min(g);
+    end = clock();
+
+    if (result_opt == NULL) {
+        fprintf(stderr, "Error: Optimized label propagation failed\n");
+        cc_result_destroy(result_uf);
+        cc_result_destroy(result_uf_no_restrict);
         graph_destroy(g);
         return EXIT_FAILURE;
     }
 
     const double elapsed_opt = (double)(end - start) / CLOCKS_PER_SEC;
-    printf("Optimized algorithm completed in %.3f seconds\n", elapsed_opt);
-    cc_result_print_stats(result, g);
+    printf("Optimized label propagation completed in %.3f seconds\n", elapsed_opt);
+    cc_result_print_stats(result_opt, g);
 
-    /* Run simple baseline version */
-    printf("\n=== Running Simple Baseline Version ===\n");
+    /* Run simple label propagation */
+    printf("\n=== Running Label Propagation (Simple) ===\n");
 
     start = clock();
     CCResult* result_simple = label_propagation_min_simple(g);
     end = clock();
 
     if (result_simple == NULL) {
-        fprintf(stderr, "Error: Simple algorithm failed\n");
-        cc_result_destroy(result);
+        fprintf(stderr, "Error: Simple label propagation failed\n");
+        cc_result_destroy(result_uf);
+        cc_result_destroy(result_uf_no_restrict);
+        cc_result_destroy(result_opt);
         graph_destroy(g);
         return EXIT_FAILURE;
     }
 
     const double elapsed_simple = (double)(end - start) / CLOCKS_PER_SEC;
-    printf("Simple algorithm completed in %.3f seconds\n", elapsed_simple);
+    printf("Simple label propagation completed in %.3f seconds\n", elapsed_simple);
     cc_result_print_stats(result_simple, g);
+
+    /* Verify all algorithms produce identical labels */
+    printf("\n=== Correctness Verification ===\n");
+    bool labels_match = true;
+    const int32_t num_vertices = graph_get_num_vertices(g);
+
+    for (int32_t i = 0; i < num_vertices; i++) {
+        if (result_uf->labels[i] != result_uf_no_restrict->labels[i] ||
+            result_uf->labels[i] != result_opt->labels[i] ||
+            result_uf->labels[i] != result_simple->labels[i]) {
+            labels_match = false;
+            break;
+        }
+    }
+
+    if (labels_match) {
+        printf("All algorithms produce IDENTICAL labels\n");
+    } else {
+        printf("WARNING: Algorithms produce DIFFERENT labels\n");
+    }
 
     /* Print comparison */
     printf("\n=== Performance Comparison ===\n");
-    printf("Optimized: %.3f seconds (%d iterations)\n", elapsed_opt, result->num_iterations);
-    printf("Simple:    %.3f seconds (%d iterations)\n", elapsed_simple, result_simple->num_iterations);
-    printf("Speedup:   %.2fx\n", elapsed_simple / elapsed_opt);
+    printf("Union-Find (restrict):      %.3f seconds (1 pass)\n", elapsed_uf);
+    printf("Union-Find (no restrict):   %.3f seconds (1 pass)\n", elapsed_uf_no_restrict);
+    printf("LP Optimized:               %.3f seconds (%d iterations)\n", elapsed_opt, result_opt->num_iterations);
+    printf("LP Simple:                  %.3f seconds (%d iterations)\n", elapsed_simple, result_simple->num_iterations);
+
+    printf("\n=== Restrict Keyword Impact ===\n");
+    if (elapsed_uf_no_restrict > elapsed_uf) {
+        printf("restrict speedup: %.2fx faster\n", elapsed_uf_no_restrict / elapsed_uf);
+    } else {
+        printf("restrict speedup: %.2fx (no benefit)\n", elapsed_uf / elapsed_uf_no_restrict);
+    }
+
+    printf("\nSpeedup vs Union-Find (restrict):\n");
+    printf("  LP Optimized: %.2fx %s\n", elapsed_opt / elapsed_uf,
+           elapsed_opt > elapsed_uf ? "slower" : "faster");
+    printf("  LP Simple:    %.2fx slower\n", elapsed_simple / elapsed_uf);
+    printf("\nLP Optimization gain: %.2fx\n", elapsed_simple / elapsed_opt);
 
     /* Cleanup */
+    cc_result_destroy(result_uf);
+    cc_result_destroy(result_uf_no_restrict);
+    cc_result_destroy(result_opt);
     cc_result_destroy(result_simple);
-    cc_result_destroy(result);
     graph_destroy(g);
 
     return EXIT_SUCCESS;
