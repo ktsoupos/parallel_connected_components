@@ -1,10 +1,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
+#include <time.h>
 #include "graph.h"
 #include "mtx_reader.h"
+#include "cc_sequential.h"
 
-int main(int argc, char** argv) {
+int main(const int argc, char** argv) {
     if (argc < 2) {
         fprintf(stderr, "Usage: %s <graph.mtx> [report_interval]\n", argv[0]);
         fprintf(stderr, "  graph.mtx: Matrix Market format graph file\n");
@@ -40,10 +42,27 @@ int main(int argc, char** argv) {
     printf("\n");
     graph_print_stats(g);
 
-    /* TODO: Run connected components algorithm here */
-    printf("\nTODO: Implement CC algorithm\n");
+    /* Run connected components algorithm */
+    printf("\nRunning connected components algorithm...\n");
+
+    const clock_t start = clock();
+    CCResult* result = label_propagation_min(g);
+    const clock_t end = clock();
+
+    if (result == NULL) {
+        fprintf(stderr, "Error: Connected components algorithm failed\n");
+        graph_destroy(g);
+        return EXIT_FAILURE;
+    }
+
+    const double elapsed = (double)(end - start) / CLOCKS_PER_SEC;
+    printf("Algorithm completed in %.3f seconds\n", elapsed);
+
+    /* Print results */
+    cc_result_print_stats(result, g);
 
     /* Cleanup */
+    cc_result_destroy(result);
     graph_destroy(g);
 
     return EXIT_SUCCESS;

@@ -28,7 +28,8 @@ add_executable(cc_sequential
     src/main.c
     src/graph.c
     src/mtx_reader.c
-#    src/cc_sequential.c
+    src/cc_common.c
+    src/cc_sequential.c
 )
 
 # Link math library

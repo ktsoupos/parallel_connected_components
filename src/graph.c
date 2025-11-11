@@ -240,7 +240,7 @@ void graph_print_stats(const Graph* g) {
         int32_t min_degree = g->num_vertices;
         int32_t max_degree = 0;
         for (int32_t i = 0; i < g->num_vertices; i++) {
-            int32_t degree = g->row_ptr[i + 1] - g->row_ptr[i];
+            const int32_t degree = g->row_ptr[i + 1] - g->row_ptr[i];
             if (degree < min_degree) {
                 min_degree = degree;
             }
