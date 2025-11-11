@@ -11,8 +11,15 @@ typedef struct {
 /**
  * Run sequential connected components using label propagation
  * Optimized with queue + bool array hybrid approach
+ * Uses restrict keyword for better compiler optimization
  */
-CCResult* label_propagation_min(const Graph* g);
+CCResult* label_propagation_min(const Graph* restrict g);
+
+/**
+ * Simple baseline label propagation (no optimizations)
+ * Processes all vertices each iteration for comparison
+ */
+CCResult* label_propagation_min_simple(const Graph* restrict g);
 
 /**
  * Free CCResult memory

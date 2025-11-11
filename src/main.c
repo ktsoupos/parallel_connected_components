@@ -42,26 +42,49 @@ int main(const int argc, char** argv) {
     printf("\n");
     graph_print_stats(g);
 
-    /* Run connected components algorithm */
-    printf("\nRunning connected components algorithm...\n");
+    /* Run optimized version */
+    printf("\n=== Running Optimized Version ===\n");
 
-    const clock_t start = clock();
+    clock_t start = clock();
     CCResult* result = label_propagation_min(g);
-    const clock_t end = clock();
+    clock_t end = clock();
 
     if (result == NULL) {
-        fprintf(stderr, "Error: Connected components algorithm failed\n");
+        fprintf(stderr, "Error: Optimized algorithm failed\n");
         graph_destroy(g);
         return EXIT_FAILURE;
     }
 
-    const double elapsed = (double)(end - start) / CLOCKS_PER_SEC;
-    printf("Algorithm completed in %.3f seconds\n", elapsed);
-
-    /* Print results */
+    const double elapsed_opt = (double)(end - start) / CLOCKS_PER_SEC;
+    printf("Optimized algorithm completed in %.3f seconds\n", elapsed_opt);
     cc_result_print_stats(result, g);
 
+    /* Run simple baseline version */
+    printf("\n=== Running Simple Baseline Version ===\n");
+
+    start = clock();
+    CCResult* result_simple = label_propagation_min_simple(g);
+    end = clock();
+
+    if (result_simple == NULL) {
+        fprintf(stderr, "Error: Simple algorithm failed\n");
+        cc_result_destroy(result);
+        graph_destroy(g);
+        return EXIT_FAILURE;
+    }
+
+    const double elapsed_simple = (double)(end - start) / CLOCKS_PER_SEC;
+    printf("Simple algorithm completed in %.3f seconds\n", elapsed_simple);
+    cc_result_print_stats(result_simple, g);
+
+    /* Print comparison */
+    printf("\n=== Performance Comparison ===\n");
+    printf("Optimized: %.3f seconds (%d iterations)\n", elapsed_opt, result->num_iterations);
+    printf("Simple:    %.3f seconds (%d iterations)\n", elapsed_simple, result_simple->num_iterations);
+    printf("Speedup:   %.2fx\n", elapsed_simple / elapsed_opt);
+
     /* Cleanup */
+    cc_result_destroy(result_simple);
     cc_result_destroy(result);
     graph_destroy(g);
 
