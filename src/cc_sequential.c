@@ -256,41 +256,16 @@ CCResult *label_propagation_min_simple(const Graph *restrict g) {
     return result;
 }
 
-/* Union-Find helper: find with iterative path compression */
-static int32_t uf_find(int32_t *restrict parent, int32_t x) {
-    /* Find root */
-    int32_t root = x;
-    while (parent[root] != root) {
-        root = parent[root];
-    }
-
-    /* Path compression: point all nodes along path directly to root */
-    while (parent[x] != root) {
+/* Union-Find helper: find with path halving (single pass)
+ * Path halving: make every node point to its grandparent
+ * Nearly as effective as full path compression but faster (one pass) */
+static inline int32_t uf_find(int32_t *restrict parent, int32_t x) {
+    while (parent[x] != x) {
         const int32_t next = parent[x];
-        parent[x] = root;
-        x = next;
+        parent[x] = parent[next];  /* Point to grandparent */
+        x = next;  /* Move to original parent */
     }
-
-    return root;
-}
-
-/* Union-Find helper: union by minimum ID
- * Always attach higher-ID root to lower-ID root
- * This directly produces minimum labels without normalization! */
-static void uf_union(int32_t *restrict parent, const int32_t x, const int32_t y) {
-    const int32_t root_x = uf_find(parent, x);
-    const int32_t root_y = uf_find(parent, y);
-
-    if (root_x == root_y) {
-        return;  /* Already in same set */
-    }
-
-    /* Union by minimum: attach higher ID to lower ID */
-    if (root_x < root_y) {
-        parent[root_y] = root_x;
-    } else {
-        parent[root_x] = root_y;
-    }
+    return x;
 }
 
 CCResult *union_find_cc(const Graph *restrict g) {
@@ -326,7 +301,7 @@ CCResult *union_find_cc(const Graph *restrict g) {
         parent[i] = i;
     }
 
-    /* Process all edges: union endpoints */
+    /* Process all edges: union endpoints with cached roots */
     for (int32_t v = 0; v < num_vertices; v++) {
         int32_t num_neighbors = 0;
         const int32_t *restrict neighbors = graph_get_neighbors(g, v, &num_neighbors);
@@ -335,9 +310,24 @@ CCResult *union_find_cc(const Graph *restrict g) {
             continue;
         }
 
+        /* Cache root of v to avoid repeated find operations */
+        int32_t root_v = uf_find(parent, v);
+
         for (int32_t j = 0; j < num_neighbors; j++) {
             const int32_t u = neighbors[j];
-            uf_union(parent, v, u);
+
+            /* Find root of u */
+            const int32_t root_u = uf_find(parent, u);
+
+            /* Direct union of roots (skip redundant finds) */
+            if (root_v != root_u) {
+                if (root_v < root_u) {
+                    parent[root_u] = root_v;
+                } else {
+                    parent[root_v] = root_u;
+                    root_v = root_u; // Update cached root
+                }
+            }
         }
     }
 
@@ -372,100 +362,6 @@ CCResult *union_find_cc(const Graph *restrict g) {
     /* Cleanup parent array */
     free(parent);
 
-    return result;
-}
-
-/* Non-restrict versions for benchmarking */
-static int32_t uf_find_no_restrict(int32_t *parent, int32_t x) {
-    int32_t root = x;
-    while (parent[root] != root) {
-        root = parent[root];
-    }
-    while (parent[x] != root) {
-        const int32_t next = parent[x];
-        parent[x] = root;
-        x = next;
-    }
-    return root;
-}
-
-static void uf_union_no_restrict(int32_t *parent, const int32_t x, const int32_t y) {
-    const int32_t root_x = uf_find_no_restrict(parent, x);
-    const int32_t root_y = uf_find_no_restrict(parent, y);
-    if (root_x == root_y) {
-        return;
-    }
-    if (root_x < root_y) {
-        parent[root_y] = root_x;
-    } else {
-        parent[root_x] = root_y;
-    }
-}
-
-CCResult *union_find_cc_no_restrict(const Graph *g) {
-    if (g == NULL) {
-        fprintf(stderr, "Error: NULL graph pointer\n");
-        return NULL;
-    }
-
-    const int32_t num_vertices = graph_get_num_vertices(g);
-    if (num_vertices <= 0) {
-        fprintf(stderr, "Error: Invalid number of vertices\n");
-        return NULL;
-    }
-
-    CCResult *result = malloc(sizeof(CCResult));
-    if (result == NULL) {
-        fprintf(stderr, "Error: Failed to allocate CCResult\n");
-        return NULL;
-    }
-
-    int32_t *parent = malloc(sizeof(int32_t) * (size_t) num_vertices);
-    if (parent == NULL) {
-        fprintf(stderr, "Error: Failed to allocate parent array\n");
-        free(result);
-        return NULL;
-    }
-
-    for (int32_t i = 0; i < num_vertices; i++) {
-        parent[i] = i;
-    }
-
-    for (int32_t v = 0; v < num_vertices; v++) {
-        int32_t num_neighbors = 0;
-        const int32_t *neighbors = graph_get_neighbors(g, v, &num_neighbors);
-        if (neighbors == NULL) {
-            continue;
-        }
-        for (int32_t j = 0; j < num_neighbors; j++) {
-            const int32_t u = neighbors[j];
-            uf_union_no_restrict(parent, v, u);
-        }
-    }
-
-    result->labels = malloc(sizeof(int32_t) * (size_t) num_vertices);
-    if (result->labels == NULL) {
-        fprintf(stderr, "Error: Failed to allocate labels array\n");
-        free(parent);
-        free(result);
-        return NULL;
-    }
-
-    for (int32_t i = 0; i < num_vertices; i++) {
-        result->labels[i] = uf_find_no_restrict(parent, i);
-    }
-
-    result->num_iterations = 1;
-    result->num_components = count_unique_labels(result->labels, num_vertices);
-    if (result->num_components < 0) {
-        fprintf(stderr, "Error: Failed to count components\n");
-        free(parent);
-        free(result->labels);
-        free(result);
-        return NULL;
-    }
-
-    free(parent);
     return result;
 }
 

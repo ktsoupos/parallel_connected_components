@@ -29,11 +29,6 @@ CCResult* label_propagation_min_simple(const Graph* restrict g);
 CCResult* union_find_cc(const Graph* restrict g);
 
 /**
- * Union-Find WITHOUT restrict keyword (for benchmarking)
- */
-CCResult* union_find_cc_no_restrict(const Graph* g);
-
-/**
  * Free CCResult memory
  */
 void cc_result_destroy(CCResult* result);
