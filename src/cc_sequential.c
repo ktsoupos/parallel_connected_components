@@ -4,8 +4,8 @@
 #include <stdio.h>
 #include <stdbool.h>
 
-CCResult* label_propagation_min(const Graph* g) {
-    /* Check arguments*/
+CCResult *label_propagation_min(const Graph *g) {
+    /* Check arguments */
     if (g == NULL) {
         fprintf(stderr, "Error: NULL graph pointer\n");
         return NULL;
@@ -18,14 +18,14 @@ CCResult* label_propagation_min(const Graph* g) {
     }
 
     /* Allocate result structure */
-    CCResult* result = malloc(sizeof(CCResult));
+    CCResult *result = malloc(sizeof(CCResult));
     if (result == NULL) {
         fprintf(stderr, "Error: Failed to allocate CCResult\n");
         return NULL;
     }
 
     /* Allocate labels array */
-    result->labels = malloc(sizeof(int32_t) * (size_t)num_vertices);
+    result->labels = malloc(sizeof(int32_t) * (size_t) num_vertices);
     if (result->labels == NULL) {
         fprintf(stderr, "Error: Failed to allocate labels array\n");
         free(result);
@@ -33,29 +33,29 @@ CCResult* label_propagation_min(const Graph* g) {
     }
 
     /* Allocate queue arrays */
-    int32_t* queue = malloc(sizeof(int32_t) * (size_t)num_vertices);
-    int32_t* next_queue = malloc(sizeof(int32_t) * (size_t)num_vertices);
-    bool* in_queue = calloc((size_t)num_vertices, sizeof(bool));
+    int32_t *queue = malloc(sizeof(int32_t) * (size_t) num_vertices);
+    int32_t *next_queue = malloc(sizeof(int32_t) * (size_t) num_vertices);
+    bool *in_queue = calloc((size_t) num_vertices, sizeof(bool));
 
     if ((queue == NULL) || (next_queue == NULL) || (in_queue == NULL)) {
         fprintf(stderr, "Error: Failed to allocate queue arrays\n");
         free(result->labels);
         free(result);
-        free(queue);      /* Safe: free(NULL) is a no-op */
-        free(next_queue); /* Safe: free(NULL) is a no-op */
-        free(in_queue);   /* Safe: free(NULL) is a no-op */
+        free(queue);
+        free(next_queue);
+        free(in_queue);
         return NULL;
     }
 
     /* Keep original pointers for cleanup (since we swap pointers in the loop) */
-    int32_t* queue_orig = queue;
-    int32_t* next_queue_orig = next_queue;
+    int32_t *queue_orig = queue;
+    int32_t *next_queue_orig = next_queue;
 
     /* Initialize: each vertex gets its own label, all vertices in queue */
     for (int32_t i = 0; i < num_vertices; i++) {
         result->labels[i] = i;
         queue[i] = i;
-        in_queue[i] = true;  /* Mark all vertices as in queue initially */
+        in_queue[i] = true; /* Mark all vertices as in queue initially */
     }
     int32_t queue_size = num_vertices;
 
@@ -89,7 +89,7 @@ CCResult* label_propagation_min(const Graph* g) {
 
             bool has_changed = false;
             int32_t num_neighbors;
-            const int32_t* neighbors = graph_get_neighbors(g, v, &num_neighbors);
+            const int32_t *neighbors = graph_get_neighbors(g, v, &num_neighbors);
 
             if (neighbors == NULL) {
                 continue;
@@ -123,18 +123,8 @@ CCResult* label_propagation_min(const Graph* g) {
                     const int32_t u = neighbors[j];
 
                     /* u already validated in previous loop */
-                    if (!in_queue[u]) {  /* Avoid duplicates */
-                        /* Safety check: prevent queue overflow */
-                        if (next_size >= num_vertices) {
-                            fprintf(stderr, "Error: Queue overflow at iteration %d\n",
-                                    result->num_iterations);
-                            free(queue_orig);
-                            free(next_queue_orig);
-                            free(in_queue);
-                            free(result->labels);
-                            free(result);
-                            return NULL;
-                        }
+                    if (!in_queue[u]) {
+                        /* Avoid duplicates */
                         next_queue[next_size++] = u;
                         in_queue[u] = true;
                     }
@@ -143,7 +133,7 @@ CCResult* label_propagation_min(const Graph* g) {
         }
 
         /* Swap queues */
-        int32_t* temp = queue;
+        int32_t *temp = queue;
         queue = next_queue;
         next_queue = temp;
         queue_size = next_size;
@@ -166,7 +156,7 @@ CCResult* label_propagation_min(const Graph* g) {
     return result;
 }
 
-void cc_result_destroy(CCResult* result) {
+void cc_result_destroy(CCResult *result) {
     if (result == NULL) {
         return;
     }
@@ -175,7 +165,7 @@ void cc_result_destroy(CCResult* result) {
     free(result);
 }
 
-void cc_result_print_stats(const CCResult* result, const Graph* g) {
+void cc_result_print_stats(const CCResult *result, const Graph *g) {
     if (result == NULL) {
         fprintf(stderr, "Error: NULL result pointer\n");
         return;
