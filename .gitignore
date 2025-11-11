@@ -81,3 +81,7 @@ out/
 *~
 .DS_Store
 Thumbs.db
+
+# Data files - ignore large downloaded graphs but keep test files
+data/*
+!data/test_small.mtx
