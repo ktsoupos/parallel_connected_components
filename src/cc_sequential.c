@@ -75,7 +75,8 @@ CCResult *label_propagation_min(const Graph *g) {
         for (int32_t i = 0; i < queue_size; i++) {
             const int32_t v = queue[i];
 
-            /* Bounds check vertex from queue */
+#ifdef DEBUG
+            /* Bounds check vertex from queue (debug only) */
             if ((v < 0) || (v >= num_vertices)) {
                 fprintf(stderr, "Error: Invalid vertex %d in queue (range: 0-%d)\n",
                         v, num_vertices - 1);
@@ -86,8 +87,8 @@ CCResult *label_propagation_min(const Graph *g) {
                 free(result);
                 return NULL;
             }
+#endif
 
-            bool has_changed = false;
             int32_t num_neighbors;
             const int32_t *neighbors = graph_get_neighbors(g, v, &num_neighbors);
 
@@ -95,11 +96,13 @@ CCResult *label_propagation_min(const Graph *g) {
                 continue;
             }
 
-            /* Find minimum label among neighbors */
+            /* Find minimum label among neighbors in single pass */
+            int32_t min_label = result->labels[v];
             for (int32_t j = 0; j < num_neighbors; j++) {
                 const int32_t u = neighbors[j];
 
-                /* Bounds check to prevent heap corruption */
+#ifdef DEBUG
+                /* Bounds check to prevent heap corruption (debug only) */
                 if ((u < 0) || (u >= num_vertices)) {
                     fprintf(stderr, "Error: Invalid neighbor index %d for vertex %d (range: 0-%d)\n",
                             u, v, num_vertices - 1);
@@ -110,21 +113,35 @@ CCResult *label_propagation_min(const Graph *g) {
                     free(result);
                     return NULL;
                 }
+#endif
 
-                if (result->labels[v] > result->labels[u]) {
-                    result->labels[v] = result->labels[u];
-                    has_changed = true;
+                if (result->labels[u] < min_label) {
+                    min_label = result->labels[u];
                 }
             }
 
-            /* If label changed, add neighbors to next queue */
-            if (has_changed) {
+            /* Only update and propagate if label actually changed */
+            if (min_label < result->labels[v]) {
+                result->labels[v] = min_label;
+
+                /* Add neighbors to next queue for propagation */
                 for (int32_t j = 0; j < num_neighbors; j++) {
                     const int32_t u = neighbors[j];
 
-                    /* u already validated in previous loop */
                     if (!in_queue[u]) {
-                        /* Avoid duplicates */
+#ifdef DEBUG
+                        /* Queue overflow check (debug only) */
+                        if (next_size >= num_vertices) {
+                            fprintf(stderr, "Error: Queue overflow at iteration %d\n",
+                                    result->num_iterations);
+                            free(queue_orig);
+                            free(next_queue_orig);
+                            free(in_queue);
+                            free(result->labels);
+                            free(result);
+                            return NULL;
+                        }
+#endif
                         next_queue[next_size++] = u;
                         in_queue[u] = true;
                     }
