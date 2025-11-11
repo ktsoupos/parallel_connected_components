@@ -30,12 +30,37 @@ add_executable(cc_sequential
     src/mtx_reader.c
     src/cc_common.c
     src/cc_sequential.c
+    benchmarks/benchmark_sequential.c
 )
 
 # Link math library
 target_link_libraries(cc_sequential m)
 
-# TODO: Add parallel versions later
-# - cc_openmp
+# Find OpenMP
+find_package(OpenMP)
+if(OpenMP_C_FOUND)
+    message(STATUS "OpenMP found: ${OpenMP_C_VERSION}")
+
+    # OpenMP parallel version
+    add_executable(cc_openmp
+        src/main.c
+        src/graph.c
+        src/mtx_reader.c
+        src/cc_common.c
+        src/cc_sequential.c
+        src/cc_parallel.c
+        benchmarks/benchmark_sequential.c
+    )
+
+    # Link OpenMP and math library
+    target_link_libraries(cc_openmp OpenMP::OpenMP_C m)
+
+    # Optional: Add OpenMP-specific flags for better performance
+    target_compile_options(cc_openmp PRIVATE -fopenmp)
+else()
+    message(WARNING "OpenMP not found - cc_openmp target will not be built")
+endif()
+
+# TODO: Add other parallel versions later
 # - cc_pthreads
 # - cc_opencilk
