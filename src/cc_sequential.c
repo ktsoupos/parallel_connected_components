@@ -32,30 +32,36 @@ CCResult *label_propagation_min(const Graph *g) {
         return NULL;
     }
 
-    /* Allocate queue arrays */
-    int32_t *queue = malloc(sizeof(int32_t) * (size_t) num_vertices);
-    int32_t *next_queue = malloc(sizeof(int32_t) * (size_t) num_vertices);
-    bool *in_queue = calloc((size_t) num_vertices, sizeof(bool));
+    /* Allocate temporary arrays in single block for better performance */
+    const size_t queue_size_bytes = sizeof(int32_t) * (size_t) num_vertices;
+    const size_t bool_size_bytes = sizeof(bool) * (size_t) num_vertices;
 
-    if ((queue == NULL) || (next_queue == NULL) || (in_queue == NULL)) {
-        fprintf(stderr, "Error: Failed to allocate queue arrays\n");
+    /* Ensure proper alignment: round up bool_size to multiple of int32_t alignment */
+    const size_t bool_size_aligned = ((bool_size_bytes + sizeof(int32_t) - 1) / sizeof(int32_t)) * sizeof(int32_t);
+    const size_t total_bytes = (2 * queue_size_bytes) + bool_size_aligned;
+
+    void *temp_memory = malloc(total_bytes);
+    if (temp_memory == NULL) {
+        fprintf(stderr, "Error: Failed to allocate temporary arrays\n");
         free(result->labels);
         free(result);
-        free(queue);
-        free(next_queue);
-        free(in_queue);
         return NULL;
     }
 
-    /* Keep original pointers for cleanup (since we swap pointers in the loop) */
-    int32_t *queue_orig = queue;
-    int32_t *next_queue_orig = next_queue;
+    /* Partition the single block into three arrays using pointer arithmetic
+     * Using pointer arithmetic avoids alignment warnings and is cleaner */
+    int32_t *queue = (int32_t *) temp_memory;
+    int32_t *next_queue = queue + num_vertices;  /* Advance by num_vertices int32_t elements */
+    bool *in_queue = (bool *) (next_queue + num_vertices);  /* Advance by another num_vertices */
+
+    /* Keep original pointer for cleanup (since we swap queue pointers in the loop) */
+    void *temp_memory_orig = temp_memory;
 
     /* Initialize: each vertex gets its own label, all vertices in queue */
     for (int32_t i = 0; i < num_vertices; i++) {
         result->labels[i] = i;
         queue[i] = i;
-        in_queue[i] = true; /* Mark all vertices as in queue initially */
+        in_queue[i] = false;  /* in_queue tracks next_queue, initially empty */
     }
     int32_t queue_size = num_vertices;
 
@@ -80,9 +86,7 @@ CCResult *label_propagation_min(const Graph *g) {
             if ((v < 0) || (v >= num_vertices)) {
                 fprintf(stderr, "Error: Invalid vertex %d in queue (range: 0-%d)\n",
                         v, num_vertices - 1);
-                free(queue_orig);
-                free(next_queue_orig);
-                free(in_queue);
+                free(temp_memory_orig);
                 free(result->labels);
                 free(result);
                 return NULL;
@@ -106,9 +110,7 @@ CCResult *label_propagation_min(const Graph *g) {
                 if ((u < 0) || (u >= num_vertices)) {
                     fprintf(stderr, "Error: Invalid neighbor index %d for vertex %d (range: 0-%d)\n",
                             u, v, num_vertices - 1);
-                    free(queue_orig);
-                    free(next_queue_orig);
-                    free(in_queue);
+                    free(temp_memory_orig);
                     free(result->labels);
                     free(result);
                     return NULL;
@@ -134,9 +136,7 @@ CCResult *label_propagation_min(const Graph *g) {
                         if (next_size >= num_vertices) {
                             fprintf(stderr, "Error: Queue overflow at iteration %d\n",
                                     result->num_iterations);
-                            free(queue_orig);
-                            free(next_queue_orig);
-                            free(in_queue);
+                            free(temp_memory_orig);
                             free(result->labels);
                             free(result);
                             return NULL;
@@ -156,10 +156,8 @@ CCResult *label_propagation_min(const Graph *g) {
         queue_size = next_size;
     }
 
-    /* Cleanup queue arrays - use original pointers */
-    free(queue_orig);
-    free(next_queue_orig);
-    free(in_queue);
+    /* Cleanup temporary arrays - single free */
+    free(temp_memory_orig);
 
     /* Count connected components */
     result->num_components = count_unique_labels(result->labels, num_vertices);
