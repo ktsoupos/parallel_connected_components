@@ -50,6 +50,7 @@ if(OpenMP_C_FOUND)
         src/cc_sequential.c
         src/cc_openmp.c
         benchmarks/benchmark_sequential.c
+        benchmarks/benchmark_openmp.c
     )
 
     # Link OpenMP and math library

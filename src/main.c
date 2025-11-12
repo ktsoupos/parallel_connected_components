@@ -35,10 +35,6 @@ int main(const int argc, char **argv) {
 
 #ifdef _OPENMP
     printf("=== Connected Components - OpenMP Parallel Version ===\n\n");
-
-    /* Test OpenMP setup */
-    openmp_hello_world();
-    printf("\n");
 #else
     printf("=== Connected Components - Sequential Version ===\n\n");
 #endif
@@ -51,11 +47,18 @@ int main(const int argc, char **argv) {
     }
 
 #ifdef _OPENMP
-    // TODO: add openmp benchmarks
+    /* Run parallel benchmarks with default number of threads */
+    const int num_threads = get_omp_threads();
+    const int result = run_parallel_benchmarks(g, num_threads);
+    if (result != 0) {
+        graph_destroy(g);
+        return EXIT_FAILURE;
+    }
 #else
     /* Run sequential benchmarks */
     const int result = run_sequential_benchmarks(g);
     if (result != 0) {
+        graph_destroy(g);
         return EXIT_FAILURE;
     }
 #endif
