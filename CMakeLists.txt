@@ -48,7 +48,7 @@ if(OpenMP_C_FOUND)
         src/mtx_reader.c
         src/cc_common.c
         src/cc_sequential.c
-        src/cc_parallel.c
+        src/cc_openmp.c
         benchmarks/benchmark_sequential.c
     )
 

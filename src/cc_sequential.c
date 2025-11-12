@@ -365,6 +365,101 @@ CCResult *union_find_cc(const Graph *restrict g) {
     return result;
 }
 
+CCResult *union_find_cc_edge_reorder(const Graph *restrict g) {
+    /* Check arguments */
+    if (g == NULL) {
+        fprintf(stderr, "Error: NULL graph pointer\n");
+        return NULL;
+    }
+
+    const int32_t num_vertices = graph_get_num_vertices(g);
+    if (num_vertices <= 0) {
+        fprintf(stderr, "Error: Invalid number of vertices\n");
+        return NULL;
+    }
+
+    /* Allocate result structure */
+    CCResult *restrict result = malloc(sizeof(CCResult));
+    if (result == NULL) {
+        fprintf(stderr, "Error: Failed to allocate CCResult\n");
+        return NULL;
+    }
+
+    /* Allocate parent array */
+    int32_t *parent = malloc(sizeof(int32_t) * (size_t) num_vertices);
+
+    if (parent == NULL) {
+        fprintf(stderr, "Error: Failed to allocate parent array\n");
+        free(result);
+        return NULL;
+    }
+
+    for (int32_t i = 0; i < num_vertices; i++) {
+        parent[i] = i;
+    }
+
+    /* Process edges with reordering: only process edge (v,u) where v < u
+     * This processes each undirected edge exactly once, improving cache locality */
+    for (int32_t v = 0; v < num_vertices; v++) {
+        int32_t num_neighbors = 0;
+        const int32_t *restrict neighbors = graph_get_neighbors(g, v, &num_neighbors);
+
+        if (neighbors == NULL) {
+            continue;
+        }
+
+        /* Cache root of v to avoid repeated find operations */
+        int32_t root_v = uf_find(parent, v);
+
+        for (int32_t j = 0; j < num_neighbors; j++) {
+            const int32_t u = neighbors[j];
+            if (u > v) {  /* Only process if u > v */
+                const int32_t root_u = uf_find(parent, u);
+                if (root_v != root_u) {
+                    if (root_v < root_u) {
+                        parent[root_u] = root_v;
+                    } else {
+                        parent[root_v] = root_u;
+                        root_v = root_u;
+                    }
+                }
+            }
+        }
+    }
+
+    /* Allocate labels array */
+    result->labels = malloc(sizeof(int32_t) * (size_t) num_vertices);
+    if (result->labels == NULL) {
+        fprintf(stderr, "Error: Failed to allocate labels array\n");
+        free(parent);
+        free(result);
+        return NULL;
+    }
+
+    /* Final path compression: assign minimum labels */
+    for (int32_t i = 0; i < num_vertices; i++) {
+        result->labels[i] = uf_find(parent, i);
+    }
+
+    /* Union-Find processes edges once, no iterations */
+    result->num_iterations = 1;
+
+    /* Count connected components */
+    result->num_components = count_unique_labels(result->labels, num_vertices);
+    if (result->num_components < 0) {
+        fprintf(stderr, "Error: Failed to count components\n");
+        free(parent);
+        free(result->labels);
+        free(result);
+        return NULL;
+    }
+
+    /* Cleanup parent array */
+    free(parent);
+
+    return result;
+}
+
 void cc_result_destroy(CCResult *result) {
     if (result == NULL) {
         return;

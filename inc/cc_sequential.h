@@ -29,6 +29,12 @@ CCResult* label_propagation_min_simple(const Graph* restrict g);
 CCResult* union_find_cc(const Graph* restrict g);
 
 /**
+ * Union-Find with edge reordering optimization
+ * Only processes each edge once (u < v), better cache locality
+ */
+CCResult* union_find_cc_edge_reorder(const Graph* restrict g);
+
+/**
  * Free CCResult memory
  */
 void cc_result_destroy(CCResult* result);

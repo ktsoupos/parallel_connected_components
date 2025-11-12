@@ -6,7 +6,7 @@
 #include "benchmark.h"
 
 #ifdef _OPENMP
-#include "cc_parallel.h"
+#include "cc_openmp.h"
 #endif
 
 int main(const int argc, char **argv) {
@@ -49,9 +49,6 @@ int main(const int argc, char **argv) {
         fprintf(stderr, "Error: Failed to read graph from '%s'\n", filename);
         return EXIT_FAILURE;
     }
-
-    printf("\n");
-    graph_print_stats(g);
 
 #ifdef _OPENMP
     // TODO: add openmp benchmarks

@@ -13,8 +13,8 @@ int run_sequential_benchmarks(const Graph* g) {
 
     const int32_t num_vertices = graph_get_num_vertices(g);
 
-    /* Run Union-Find */
-    printf("\n=== Running Union-Find (Optimal) ===\n");
+    /* Run Union-Find (baseline) */
+    printf("\n=== Running Union-Find (Baseline) ===\n");
     clock_t start = clock();
     CCResult* result_uf = union_find_cc(g);
     clock_t end = clock();
@@ -27,6 +27,22 @@ int run_sequential_benchmarks(const Graph* g) {
     const double elapsed_uf = (double)(end - start) / CLOCKS_PER_SEC;
     printf("Union-Find completed in %.3f seconds\n", elapsed_uf);
     cc_result_print_stats(result_uf, g);
+
+    /* Run Union-Find with edge reordering */
+    printf("\n=== Running Union-Find (Edge Reordering) ===\n");
+    start = clock();
+    CCResult* result_uf_edge = union_find_cc_edge_reorder(g);
+    end = clock();
+
+    if (result_uf_edge == NULL) {
+        fprintf(stderr, "Error: Union-Find edge reordering algorithm failed\n");
+        cc_result_destroy(result_uf);
+        return -1;
+    }
+
+    const double elapsed_uf_edge = (double)(end - start) / CLOCKS_PER_SEC;
+    printf("Union-Find (edge reorder) completed in %.3f seconds\n", elapsed_uf_edge);
+    cc_result_print_stats(result_uf_edge, g);
 
     /* Run optimized label propagation */
     printf("\n=== Running Label Propagation (Optimized) ===\n");
@@ -66,7 +82,8 @@ int run_sequential_benchmarks(const Graph* g) {
     bool labels_match = true;
 
     for (int32_t i = 0; i < num_vertices; i++) {
-        if (result_uf->labels[i] != result_opt->labels[i] ||
+        if (result_uf->labels[i] != result_uf_edge->labels[i] ||
+            result_uf->labels[i] != result_opt->labels[i] ||
             result_uf->labels[i] != result_simple->labels[i]) {
             labels_match = false;
             break;
@@ -81,19 +98,22 @@ int run_sequential_benchmarks(const Graph* g) {
 
     /* Print comparison */
     printf("\n=== Performance Comparison ===\n");
-    printf("Union-Find:    %.3f seconds (1 pass)\n", elapsed_uf);
-    printf("LP Optimized:  %.3f seconds (%d iterations)\n", elapsed_opt, result_opt->num_iterations);
-    printf("LP Simple:     %.3f seconds (%d iterations)\n", elapsed_simple, result_simple->num_iterations);
+    printf("LP Simple (baseline):  %.3f seconds (%d iterations)\n", elapsed_simple, result_simple->num_iterations);
+    printf("LP Optimized:          %.3f seconds (%d iterations)\n", elapsed_opt, result_opt->num_iterations);
+    printf("UF Baseline:           %.3f seconds (1 pass)\n", elapsed_uf);
+    printf("UF Edge Reorder:       %.3f seconds (1 pass)\n", elapsed_uf_edge);
 
-    printf("\nSpeedup vs Union-Find:\n");
-    printf("  LP Optimized: %.2fx %s\n", elapsed_opt / elapsed_uf,
-           elapsed_opt > elapsed_uf ? "slower" : "faster");
-    printf("  LP Simple:    %.2fx %s\n", elapsed_simple / elapsed_uf,
-           elapsed_simple > elapsed_uf ? "slower" : "faster");
-    printf("\nLP Optimization gain: %.2fx\n", elapsed_simple / elapsed_opt);
+    printf("\nSpeedup vs LP Simple (Baseline):\n");
+    printf("  LP Optimized:    %.2fx %s\n", elapsed_simple / elapsed_opt,
+           elapsed_opt > elapsed_simple ? "slower" : "faster");
+    printf("  UF Baseline:     %.2fx %s\n", elapsed_simple / elapsed_uf,
+           elapsed_uf > elapsed_simple ? "slower" : "faster");
+    printf("  UF Edge Reorder: %.2fx %s\n", elapsed_simple / elapsed_uf_edge,
+           elapsed_uf_edge > elapsed_simple ? "slower" : "faster");
 
     /* Cleanup */
     cc_result_destroy(result_uf);
+    cc_result_destroy(result_uf_edge);
     cc_result_destroy(result_opt);
     cc_result_destroy(result_simple);
 
