@@ -67,12 +67,39 @@ A small test graph is included: `data/test_small.mtx`
 
 Place additional `.mtx` graph files in the `data/` directory.
 
+## Algorithms
+
+### Sequential Implementations
+
+1. **Label Propagation (Simple)** - Baseline implementation that processes all vertices each iteration
+2. **Label Propagation (Optimized)** - Queue-based approach that only processes changed vertices
+3. **Union-Find (Baseline)** - Path halving with union-by-minimum
+4. **Union-Find (Edge Reorder)** - Optimized to process each undirected edge only once
+
+## Performance
+
+Benchmark on graph with 3,997,962 vertices (single component):
+
+| Algorithm | Time (seconds) | Speedup vs LP Simple |
+|-----------|---------------|---------------------|
+| LP Simple (baseline) | 0.850 | 1.00x |
+| LP Optimized | 0.701 | 1.21x faster |
+| UF Baseline | 0.238 | 3.58x faster |
+| **UF Edge Reorder** | **0.201** | **4.24x faster** |
+
+**Key Optimizations:**
+- **Edge Reordering**: Processes each undirected edge once (u > v check) instead of twice, reducing work by ~50%
+- **Path Halving**: Single-pass path compression in union-find
+- **Root Caching**: Avoids redundant find operations per vertex
+- **Queue-based LP**: Only processes vertices with changed labels
+
 ## Current Status
 
 - [Done] Graph data structure (CSR format)
 - [Done] Matrix Market file reader
 - [Done] Main program with CLI
-- [TODO] Sequential CC algorithm
+- [Done] Sequential CC algorithms (4 variants)
+- [Done] Benchmarking framework
 - [TODO] OpenMP parallel version
 - [TODO] PThreads parallel version
 - [TODO] OpenCilk parallel version
