@@ -61,6 +61,26 @@ int run_parallel_benchmarks(const Graph* g, int num_threads) {
         return -1;
     }
 
+    /* Run Shiloach–Vishkin algorithm */
+    printf("\n=== OpenMP Shiloach–Vishkin Connected Components ===\n");
+    const double start_sv = omp_get_wtime();
+    CCResult* result_sv = shiiloach_vishkin(g, num_threads);
+    const double end_sv = omp_get_wtime();
+
+    if (result_sv == NULL) {
+        fprintf(stderr, "Error: Shiloach–Vishkin algorithm failed\n");
+        cc_result_destroy(result_seq);
+        cc_result_destroy(result_sync);
+        cc_result_destroy(result_async);
+        return -1;
+    }
+
+    const double elapsed_sv = end_sv - start_sv;
+    printf("OpenMP Shiloach–Vishkin completed in %.3f seconds\n", elapsed_sv);
+    cc_result_print_stats(result_sv, g);
+
+
+
     const double elapsed_async = end_async - start_async;
     printf("OpenMP asynchronous LP completed in %.3f seconds\n", elapsed_async);
     cc_result_print_stats(result_async, g);
@@ -100,28 +120,30 @@ int run_parallel_benchmarks(const Graph* g, int num_threads) {
            num_threads, elapsed_sync, result_sync->num_iterations);
     printf("Parallel (async LP, %d threads): %.3f seconds (%d iterations)\n",
            num_threads, elapsed_async, result_async->num_iterations);
+    printf("Parallel (SV, %d threads):      %.3f seconds (%d iterations)\n",
+          num_threads, elapsed_sv, result_sv->num_iterations);
 
     /* Compute and print speedups */
     if (elapsed_seq > 0.0) {
-        double speedup_sync = elapsed_seq / elapsed_sync;
-        double speedup_async = elapsed_seq / elapsed_async;
-        double eff_sync = speedup_sync / (double) num_threads * 100.0;
-        double eff_async = speedup_async / (double) num_threads * 100.0;
+        const double speedup_sync = elapsed_seq / elapsed_sync;
+        const double speedup_async = elapsed_seq / elapsed_async;
+        const double eff_sync = speedup_sync / (double) num_threads * 100.0;
+        const double eff_async = speedup_async / (double) num_threads * 100.0;
+        const double speedup_sv = elapsed_seq / elapsed_sv;
+        const double eff_sv = speedup_sv / (double) num_threads * 100.0;
 
         printf("\nSpeedup vs sequential:\n");
         printf("  Sync LP:  %.2fx (%.1f%% efficiency)\n", speedup_sync, eff_sync);
         printf("  Async LP: %.2fx (%.1f%% efficiency)\n", speedup_async, eff_async);
+        printf("  Shiloach–Vishkin: %.2fx (%.1f%% efficiency)\n", speedup_sv, eff_sv);
 
-        if (elapsed_async < elapsed_sync)
-            printf("\nAsync LP is %.2fx faster than Sync LP\n", elapsed_sync / elapsed_async);
-        else
-            printf("\nAsync LP is %.2fx slower than Sync LP\n", elapsed_async / elapsed_sync);
     }
 
     /* Cleanup */
     cc_result_destroy(result_seq);
     cc_result_destroy(result_sync);
     cc_result_destroy(result_async);
+    cc_result_destroy(result_sv);
 
     return 0;
 }
