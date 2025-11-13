@@ -79,7 +79,24 @@ int run_parallel_benchmarks(const Graph* g, int num_threads) {
     printf("OpenMP Shiloach–Vishkin completed in %.3f seconds\n", elapsed_sv);
     cc_result_print_stats(result_sv, g);
 
+    /* Run Afforest algorithm */
+    printf("\n=== OpenMP Afforest Connected Components ===\n");
+    const double start_afforest = omp_get_wtime();
+    CCResult* result_afforest = afforest(g, num_threads, 2);
+    const double end_afforest = omp_get_wtime();
 
+    if (result_afforest == NULL) {
+        fprintf(stderr, "Error: Afforest algorithm failed\n");
+        cc_result_destroy(result_seq);
+        cc_result_destroy(result_sync);
+        cc_result_destroy(result_async);
+        cc_result_destroy(result_sv);
+        return -1;
+    }
+
+    const double elapsed_afforest = end_afforest - start_afforest;
+    printf("OpenMP Afforest completed in %.3f seconds\n", elapsed_afforest);
+    cc_result_print_stats(result_afforest, g);
 
     const double elapsed_async = end_async - start_async;
     printf("OpenMP asynchronous LP completed in %.3f seconds\n", elapsed_async);
@@ -88,7 +105,9 @@ int run_parallel_benchmarks(const Graph* g, int num_threads) {
     /* Verify correctness: compare component counts */
     printf("\n=== Correctness Verification ===\n");
     if (result_seq->num_components == result_sync->num_components &&
-        result_seq->num_components == result_async->num_components) {
+        result_seq->num_components == result_async->num_components &&
+        result_seq->num_components == result_sv->num_components &&
+        result_seq->num_components == result_afforest->num_components) {
         printf("Component counts MATCH: %d components\n", result_seq->num_components);
 
         /* Verify labels produce same components */
@@ -108,9 +127,11 @@ int run_parallel_benchmarks(const Graph* g, int num_threads) {
         }
     } else {
         printf("WARNING: Component counts DIFFER\n");
-        printf("  Sequential:      %d components\n", result_seq->num_components);
-        printf("  Parallel Sync:   %d components\n", result_sync->num_components);
-        printf("  Parallel Async:  %d components\n", result_async->num_components);
+        printf("  Sequential:         %d components\n", result_seq->num_components);
+        printf("  Parallel Sync:      %d components\n", result_sync->num_components);
+        printf("  Parallel Async:     %d components\n", result_async->num_components);
+        printf("  Shiloach-Vishkin:   %d components\n", result_sv->num_components);
+        printf("  Afforest:           %d components\n", result_afforest->num_components);
     }
 
     /* Print performance comparison */
@@ -122,6 +143,8 @@ int run_parallel_benchmarks(const Graph* g, int num_threads) {
            num_threads, elapsed_async, result_async->num_iterations);
     printf("Parallel (SV, %d threads):      %.3f seconds (%d iterations)\n",
           num_threads, elapsed_sv, result_sv->num_iterations);
+    printf("Parallel (Afforest, %d threads): %.3f seconds\n",
+          num_threads, elapsed_afforest);
 
     /* Compute and print speedups */
     if (elapsed_seq > 0.0) {
@@ -131,11 +154,14 @@ int run_parallel_benchmarks(const Graph* g, int num_threads) {
         const double eff_async = speedup_async / (double) num_threads * 100.0;
         const double speedup_sv = elapsed_seq / elapsed_sv;
         const double eff_sv = speedup_sv / (double) num_threads * 100.0;
+        const double speedup_afforest = elapsed_seq / elapsed_afforest;
+        const double eff_afforest = speedup_afforest / (double) num_threads * 100.0;
 
         printf("\nSpeedup vs sequential:\n");
         printf("  Sync LP:  %.2fx (%.1f%% efficiency)\n", speedup_sync, eff_sync);
         printf("  Async LP: %.2fx (%.1f%% efficiency)\n", speedup_async, eff_async);
         printf("  Shiloach–Vishkin: %.2fx (%.1f%% efficiency)\n", speedup_sv, eff_sv);
+        printf("  Afforest: %.2fx (%.1f%% efficiency)\n", speedup_afforest, eff_afforest);
 
     }
 
@@ -144,6 +170,7 @@ int run_parallel_benchmarks(const Graph* g, int num_threads) {
     cc_result_destroy(result_sync);
     cc_result_destroy(result_async);
     cc_result_destroy(result_sv);
+    cc_result_destroy(result_afforest);
 
     return 0;
 }

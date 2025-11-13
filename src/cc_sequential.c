@@ -259,7 +259,7 @@ CCResult *label_propagation_min_simple(const Graph *restrict g) {
 /* Union-Find helper: find with path halving (single pass)
  * Path halving: make every node point to its grandparent
  * Nearly as effective as full path compression but faster (one pass) */
-static inline int32_t uf_find(int32_t *restrict parent, int32_t x) {
+static int32_t uf_find(int32_t *restrict parent, int32_t x) {
     while (parent[x] != x) {
         const int32_t next = parent[x];
         parent[x] = parent[next];  /* Point to grandparent */

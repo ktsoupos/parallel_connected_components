@@ -25,6 +25,8 @@ CCResult* label_propagation_async_omp(const Graph* restrict g, int num_threads);
 
 CCResult* shiiloach_vishkin(const Graph* restrict g, int num_threads);
 
+CCResult* afforest(const Graph* restrict g, int num_threads, int32_t neighbor_rounds);
+
 /**
  * Set number of OpenMP threads (for testing)
  * Returns the number actually set

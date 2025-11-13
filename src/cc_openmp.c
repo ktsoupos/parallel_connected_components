@@ -141,7 +141,6 @@ CCResult *label_propagation_sync_omp(const Graph *restrict g, const int num_thre
 }
 
 CCResult *label_propagation_async_omp(const Graph *restrict g, int num_threads) {
-    /* Check arguments */
     if (g == NULL) {
         fprintf(stderr, "Error: NULL graph pointer\n");
         return NULL;
@@ -153,88 +152,92 @@ CCResult *label_propagation_async_omp(const Graph *restrict g, int num_threads) 
         return NULL;
     }
 
-    /* Set number of threads */
+    /* Configure OpenMP threads */
     set_omp_threads(num_threads);
 
-    /* Allocate result structure */
+    /* Allocate result */
     CCResult *restrict result = malloc(sizeof(CCResult));
     if (result == NULL) {
         fprintf(stderr, "Error: Failed to allocate CCResult\n");
         return NULL;
     }
 
-    /* Allocate labels arrays - need two for double buffering */
-    int32_t *labels = malloc(sizeof(int32_t) * (size_t) num_vertices);
-
+    /* Allocate aligned label array for better cache performance */
+    int32_t *restrict labels = aligned_alloc(64, sizeof(int32_t) * (size_t) num_vertices);
     if (labels == NULL) {
-        fprintf(stderr, "Error: Failed to allocate labels arrays\n");
-        free(labels);
+        fprintf(stderr, "Error: Failed to allocate label array\n");
         free(result);
         return NULL;
     }
 
-    /* Initialize: each vertex gets its own label */
-#pragma omp parallel for default(none) shared(labels, num_vertices)
+    /* Initialize: each vertex is its own label */
+#pragma omp parallel for schedule(static)
     for (int32_t i = 0; i < num_vertices; i++) {
         labels[i] = i;
     }
 
-    bool changed = false;
     result->num_iterations = 0;
     const int32_t max_iterations = num_vertices;
+    bool changed = true;
 
-    /* Note: Static analyzers may warn about this loop, but the OpenMP reduction
-     * clause correctly updates 'changed' across threads, allowing proper termination. max_iterations.
-     * max_iterations signals compiler that the loop will be terminated */
-    do {
+    /* --- Label Propagation with Asynchronous Updates --- */
+    while (changed && result->num_iterations < max_iterations) {
         result->num_iterations++;
         changed = false;
 
-        /* All vertices update their labels in parallel */
-#pragma omp parallel for default(none) shared(g, labels, num_vertices) reduction(||:changed)
-        for (int32_t v = 0; v < num_vertices; v++) {
-            int32_t num_neighbors;
-            const int32_t *restrict neighbors = graph_get_neighbors(g, v, &num_neighbors);
+#pragma omp parallel
+        {
+            bool local_changed = false;
 
-            if (neighbors == NULL) {
-                continue;
-            }
+#pragma omp for schedule(dynamic, 128) nowait
+            for (int32_t v = 0; v < num_vertices; v++) {
+                const int start = g->row_ptr[v];
+                const int end = g->row_ptr[v + 1];
+                const int num_neighbors = end - start;
 
-            /* Find minimum label among neighbors */
-            int32_t min_label = labels[v];
-            for (int32_t j = 0; j < num_neighbors; j++) {
-                const int32_t u = neighbors[j];
-                if (labels[u] < min_label) {
-                    min_label = labels[u];
+                if (num_neighbors == 0) {
+                    continue;
+                }
+                int32_t min_label = labels[v];
+
+                // Find minimum label among neighbors
+                for (int32_t i = start; i < end; i++) {
+                    const int32_t u = g->col_idx[i];
+                    if (labels[u] < min_label)
+                        min_label = labels[u];
+                }
+
+                // Update own label if smaller found
+                if (min_label < labels[v]) {
+#pragma omp atomic write
+                    labels[v] = min_label;
+                    local_changed = true;
+                }
+
+                // Propagate min_label to neighbors (async)
+                for (int32_t i = start; i < end; i++) {
+                    const int32_t u = g->col_idx[i];
+                    if (labels[u] > min_label) {
+#pragma omp atomic write
+                        labels[u] = min_label;
+                        local_changed = true;
+                    }
                 }
             }
-
-            /* Track if any change occurred */
-            if (min_label < labels[v]) {
-#pragma omp atomic write
-                labels[v] = min_label;
-                changed = true;
-            }
-            /* Propagate label to the neighbors*/
-            for (int32_t j = 0; j < num_neighbors; j++) {
-                const int32_t u = neighbors[j];
-                if (labels[u] > min_label) {
-#pragma omp atomic write
-                    labels[u] = min_label;
-                    changed = true;
-                }
+#pragma omp critical
+            {
+                changed |= local_changed;
             }
         }
-    } while (changed && result->num_iterations < max_iterations);
+    } // end while
 
-    /* Store final labels in result */
+    /* Finalize result */
     result->labels = labels;
 
-    /* Count connected components */
-    result->num_components = count_unique_labels(result->labels, num_vertices);
+    result->num_components = count_unique_labels(labels, num_vertices);
     if (result->num_components < 0) {
         fprintf(stderr, "Error: Failed to count components\n");
-        free(result->labels);
+        free(labels);
         free(result);
         return NULL;
     }
@@ -242,27 +245,29 @@ CCResult *label_propagation_async_omp(const Graph *restrict g, int num_threads) 
     return result;
 }
 
+
 /**
  * Hook phase helper: Attempts to hook smaller component roots to neighbors
  * Returns true if any hooking occurred
  * (Ignore static analyser warning)
  */
-static bool hook_phase(const Graph *restrict g, int32_t *restrict parents, const int32_t num_vertices) {
+
+static bool hook_phase(const int32_t *restrict row_ptr, const int32_t *restrict col_idx, int32_t *restrict parents,
+                       const int32_t num_vertices) {
     bool hooking = false;
 
-    /* For all vertices in parallel */
-#pragma omp parallel for default(none) shared(g, parents, num_vertices) reduction(||:hooking)
+    /* For all vertices in parallel - use schedule(guided) for load balancing */
+    // clang-format off
+#pragma omp parallel for default(none) shared(row_ptr, col_idx, parents, num_vertices) reduction(||:hooking) schedule(dynamic, 128)
+    // clang-format on
     for (int32_t u = 0; u < num_vertices; u++) {
-        int32_t num_neighbors = 0;
-        const int32_t *restrict neighbors = graph_get_neighbors(g, u, &num_neighbors);
-
-        if (neighbors == NULL) {
-            continue;
-        }
+        /* Direct CSR access for better performance */
+        const int32_t start = row_ptr[u];
+        const int32_t end = row_ptr[u + 1];
 
         /* For all neighbors of u */
-        for (int32_t j = 0; j < num_neighbors; j++) {
-            const int32_t v = neighbors[j];
+        for (int32_t j = start; j < end; j++) {
+            const int32_t v = col_idx[j];
 
             /* Read parent values once to avoid race conditions */
             const int32_t pi_u = parents[u];
@@ -286,13 +291,23 @@ static bool hook_phase(const Graph *restrict g, int32_t *restrict parents, const
  * Shortcut phase helper: Performs path compression on all vertices
  */
 static void shortcut_phase(int32_t *restrict parents, const int32_t num_vertices) {
-    /* For all vertices in parallel */
-#pragma omp parallel for default(none) shared(parents, num_vertices)
+    /* For all vertices in parallel - use static scheduling for predictable workload */
+#pragma omp parallel for default(none) shared(parents, num_vertices) schedule(static)
     for (int32_t v = 0; v < num_vertices; v++) {
         /* Path compression: follow parent pointers until reaching root */
-        while (parents[parents[v]] != parents[v]) {
-            parents[v] = parents[parents[v]];
+        int32_t current = v;
+        int32_t parent = parents[current];
+
+        /* Two-pass approach to reduce thread divergence */
+        while (parent != parents[parent]) {
+            const int32_t grandparent = parents[parent];
+            parents[current] = grandparent;
+            current = parent;
+            parent = grandparent;
         }
+
+        /* Final update to root */
+        parents[v] = parent;
     }
 }
 
@@ -319,8 +334,8 @@ CCResult *shiiloach_vishkin(const Graph *restrict g, const int num_threads) {
         return NULL;
     }
 
-    /* Allocate parent array (π in the algorithm) */
-    int32_t *parents = malloc(sizeof(int32_t) * (size_t) num_vertices);
+    /* Allocate aligned parent array (π in the algorithm) for better cache performance */
+    int32_t *parents = aligned_alloc(64, sizeof(int32_t) * (size_t) num_vertices);
 
     if (parents == NULL) {
         fprintf(stderr, "Error: Failed to allocate parent array\n");
@@ -329,7 +344,7 @@ CCResult *shiiloach_vishkin(const Graph *restrict g, const int num_threads) {
     }
 
     /* Initialize: each vertex is its own parent (π(v) ← v) */
-#pragma omp parallel for default(none) shared(parents, num_vertices)
+#pragma omp parallel for default(none) shared(parents, num_vertices) schedule(static)
     for (int32_t i = 0; i < num_vertices; i++) {
         parents[i] = i;
     }
@@ -339,11 +354,12 @@ CCResult *shiiloach_vishkin(const Graph *restrict g, const int num_threads) {
     bool hooking = true;
     const int32_t max_iterations = num_vertices; // Safety bound
 
-    while (hooking && result->num_iterations < max_iterations) { // ignore compiler warning  on hooking
+    while (hooking && result->num_iterations < max_iterations) {
+        // ignore compiler warning  on hooking
         result->num_iterations++;
 
         /* Hook phase: try to connect components */
-        hooking = hook_phase(g, parents, num_vertices);
+        hooking = hook_phase(g->row_ptr, g->col_idx, parents, num_vertices);
 
         /* Shortcut phase: path compression */
         shortcut_phase(parents, num_vertices);
@@ -351,6 +367,136 @@ CCResult *shiiloach_vishkin(const Graph *restrict g, const int num_threads) {
 
     /* Store final labels in result */
     result->labels = parents;
+
+    /* Count connected components */
+    result->num_components = count_unique_labels(result->labels, num_vertices);
+    if (result->num_components < 0) {
+        fprintf(stderr, "Error: Failed to count components\n");
+        free(result->labels);
+        free(result);
+        return NULL;
+    }
+
+    return result;
+}
+
+/**
+ * Link two vertices u and v using union-find with path compression
+ * Based on the Link function from the GAP Benchmark Suite Afforest implementation
+ */
+__attribute__((always_inline)) inline
+static void link_vertices(const int32_t u, const int32_t v, int32_t *restrict parents) {
+    /* Read parent values */
+    int32_t p1 = parents[u];
+    int32_t p2 = parents[v];
+
+    while (p1 != p2) {
+        const int32_t high = (p1 > p2) ? p1 : p2;
+        const int32_t low = (p1 < p2) ? p1 : p2;
+        const int32_t p_high = parents[high];
+        int32_t expected = high;
+
+        if ((p_high == low) || // Was already 'low'
+            (p_high == high && (__atomic_compare_exchange_n( // Succeeded on writing 'low'
+                 &parents[high], &expected, low, false,
+                 __ATOMIC_SEQ_CST,
+                 __ATOMIC_SEQ_CST)))) {
+            break;
+        }
+
+        p1 = parents[expected]; // Update with actual value after CAS
+        p2 = parents[low];
+    }
+}
+
+static void compress(int32_t *restrict parents, int32_t num_vertices) {
+#pragma omp parallel for schedule(static, 2048) // todo check chunk size
+    for (int32_t n = 0; n < num_vertices; n++) {
+        while (parents[parents[n]] != parents[n]) {
+            parents[n] = parents[parents[n]];
+        }
+    }
+}
+
+
+CCResult *afforest(const Graph *restrict g, int num_threads, int32_t neighbor_rounds) {
+    /* Check arguments */
+    if (g == NULL) {
+        fprintf(stderr, "Error: NULL graph pointer\n");
+        return NULL;
+    }
+
+    const int32_t num_vertices = graph_get_num_vertices(g);
+    if (num_vertices <= 0) {
+        fprintf(stderr, "Error: Invalid number of vertices\n");
+        return NULL;
+    }
+
+    /* Set number of threads */
+    set_omp_threads(num_threads);
+
+    /* Allocate result structure */
+    CCResult *restrict result = malloc(sizeof(CCResult));
+    if (result == NULL) {
+        fprintf(stderr, "Error: Failed to allocate CCResult\n");
+        return NULL;
+    }
+
+    /* Allocate aligned parent array (π in the algorithm) for better cache performance */
+    int32_t *parents = aligned_alloc(64, sizeof(int32_t) * (size_t) num_vertices);
+
+    if (parents == NULL) {
+        fprintf(stderr, "Error: Failed to allocate parent array\n");
+        free(result);
+        return NULL;
+    }
+
+    /* Initialize: each vertex is its own parent (π(v) ← v) */
+#pragma omp parallel for default(none) shared(parents, num_vertices) schedule(static)
+    for (int32_t i = 0; i < num_vertices; i++) {
+        parents[i] = i;
+    }
+
+    /* Set default neighbor_rounds if needed */
+    if (neighbor_rounds <= 0) {
+        neighbor_rounds = 2; // Default: sample first 2 neighbors
+    }
+
+    for (int32_t r = 0; r < neighbor_rounds; ++r) {
+#pragma omp parallel for
+        for (int32_t u = 0; u < num_vertices; u++) {
+            const int32_t start = g->row_ptr[u];
+            const int32_t end = g->row_ptr[u + 1];
+            const int32_t num_neighbors = end - start;
+            if (r < num_neighbors) {
+                const int32_t v = g->col_idx[start + r]; // get the r-th neighbor
+                link_vertices(u, v, parents);
+            }
+        }
+        compress(parents, num_vertices);
+    }
+
+    const int32_t largest_component = sample_frequent_element(parents, num_vertices, 1024);
+//clang-format off
+#pragma omp parallel for schedule(dynamic, 2048)
+    //clang-format on
+    for (int32_t u = 0; u < num_vertices; u++) {
+        if (parents[u] == largest_component) continue;
+
+        const int32_t start = g->row_ptr[u];
+        const int32_t end = g->row_ptr[u + 1];
+
+        /* Process remaining neighbors (after neighbor_rounds) */
+        for (int32_t j = start + neighbor_rounds; j < end; j++) {
+            const int32_t v = g->col_idx[j];
+            link_vertices(u, v, parents);
+        }
+    }
+    compress(parents, num_vertices);
+
+    /* Store final labels in result */
+    result->labels = parents;
+    result->num_iterations = neighbor_rounds + 1; // Sampling rounds + final phase
 
     /* Count connected components */
     result->num_components = count_unique_labels(result->labels, num_vertices);
