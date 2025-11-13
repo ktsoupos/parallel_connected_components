@@ -25,6 +25,14 @@ CCResult* label_propagation_async_omp(const Graph* restrict g, int num_threads);
 
 CCResult* shiiloach_vishkin(const Graph* restrict g, int num_threads);
 
+/**
+ * Sample frequent element from component array
+ * Returns the most frequently occurring component ID from random samples
+ * Used in Afforest to identify the largest component
+ */
+int32_t sample_frequent_element(const int32_t *comp, int32_t num_vertices, int32_t num_samples);
+
+
 CCResult* afforest(const Graph* restrict g, int num_threads, int32_t neighbor_rounds);
 
 /**

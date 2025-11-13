@@ -29,7 +29,7 @@ int run_parallel_benchmarks(const Graph* g, int num_threads) {
     }
 
     const double elapsed_seq = end_seq - start_seq;
-    printf("Sequential UF completed in %.3f seconds\n", elapsed_seq);
+    printf("Sequential UF completed in %.5f seconds\n", elapsed_seq);
     cc_result_print_stats(result_seq, g);
 
     /* Run synchronous label propagation with OpenMP */
@@ -45,7 +45,7 @@ int run_parallel_benchmarks(const Graph* g, int num_threads) {
     }
 
     const double elapsed_sync = end_sync - start_sync;
-    printf("OpenMP synchronous LP completed in %.3f seconds\n", elapsed_sync);
+    printf("OpenMP synchronous LP completed in %.5f seconds\n", elapsed_sync);
     cc_result_print_stats(result_sync, g);
 
     /* Run asynchronous label propagation with OpenMP */
@@ -76,7 +76,7 @@ int run_parallel_benchmarks(const Graph* g, int num_threads) {
     }
 
     const double elapsed_sv = end_sv - start_sv;
-    printf("OpenMP Shiloach–Vishkin completed in %.3f seconds\n", elapsed_sv);
+    printf("OpenMP Shiloach–Vishkin completed in %.5f seconds\n", elapsed_sv);
     cc_result_print_stats(result_sv, g);
 
     /* Run Afforest algorithm */
@@ -95,11 +95,11 @@ int run_parallel_benchmarks(const Graph* g, int num_threads) {
     }
 
     const double elapsed_afforest = end_afforest - start_afforest;
-    printf("OpenMP Afforest completed in %.3f seconds\n", elapsed_afforest);
+    printf("OpenMP Afforest completed in %.5f seconds\n", elapsed_afforest);
     cc_result_print_stats(result_afforest, g);
 
     const double elapsed_async = end_async - start_async;
-    printf("OpenMP asynchronous LP completed in %.3f seconds\n", elapsed_async);
+    printf("OpenMP asynchronous LP completed in %.5f seconds\n", elapsed_async);
     cc_result_print_stats(result_async, g);
 
     /* Verify correctness: compare component counts */
@@ -136,14 +136,14 @@ int run_parallel_benchmarks(const Graph* g, int num_threads) {
 
     /* Print performance comparison */
     printf("\n=== Performance Comparison ===\n");
-    printf("Sequential (UF edge reorder): %.3f seconds\n", elapsed_seq);
-    printf("Parallel (sync LP, %d threads):  %.3f seconds (%d iterations)\n",
+    printf("Sequential (UF edge reorder): %.5f seconds\n", elapsed_seq);
+    printf("Parallel (sync LP, %d threads):  %.5f seconds (%d iterations)\n",
            num_threads, elapsed_sync, result_sync->num_iterations);
-    printf("Parallel (async LP, %d threads): %.3f seconds (%d iterations)\n",
+    printf("Parallel (async LP, %d threads): %.5f seconds (%d iterations)\n",
            num_threads, elapsed_async, result_async->num_iterations);
-    printf("Parallel (SV, %d threads):      %.3f seconds (%d iterations)\n",
+    printf("Parallel (SV, %d threads):      %.5f seconds (%d iterations)\n",
           num_threads, elapsed_sv, result_sv->num_iterations);
-    printf("Parallel (Afforest, %d threads): %.3f seconds\n",
+    printf("Parallel (Afforest, %d threads): %.5f seconds\n",
           num_threads, elapsed_afforest);
 
     /* Compute and print speedups */

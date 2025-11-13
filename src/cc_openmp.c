@@ -4,6 +4,8 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <omp.h>
+#include <time.h>
+
 
 int set_omp_threads(int num_threads) {
     if (num_threads <= 0) {
@@ -416,6 +418,85 @@ static void compress(int32_t *restrict parents, int32_t num_vertices) {
             parents[n] = parents[parents[n]];
         }
     }
+}
+
+/**
+ * Parallel version of sample_frequent_element
+ * Uses OpenMP to parallelize both sampling and max-finding
+ */
+int32_t sample_frequent_element(const int32_t *comp, int32_t num_vertices, int32_t num_samples) {
+    if (comp == NULL || num_vertices <= 0 || num_samples <= 0) {
+        fprintf(stderr, "Error: Invalid parameters for sample_frequent_element\n");
+        return -1;
+    }
+
+    /* Allocate counter array for tracking sample counts */
+    int32_t *sample_counts = calloc((size_t)num_vertices, sizeof(int32_t));
+    if (sample_counts == NULL) {
+        fprintf(stderr, "Error: Failed to allocate sample_counts array\n");
+        return -1;
+    }
+
+    /* Parallel sampling phase */
+    const unsigned int base_seed = (unsigned int)(time(NULL) ^ (time_t)(uintptr_t)comp);
+
+#pragma omp parallel
+    {
+        /* Each thread gets its own seed based on thread ID */
+        const int tid = omp_get_thread_num();
+        unsigned int thread_seed = base_seed + (unsigned int)tid;
+
+#pragma omp for schedule(static)
+        for (int32_t i = 0; i < num_samples; i++) {
+            /* Thread-safe random number generation */
+            const unsigned int rand_val = rand_r(&thread_seed);
+            const int32_t idx = (int32_t)(rand_val % (unsigned int)num_vertices);
+            const int32_t component_id = comp[idx];
+
+            /* Bounds check to prevent heap corruption */
+            if (component_id >= 0 && component_id < num_vertices) {
+                /* Atomic increment to avoid race conditions */
+#pragma omp atomic
+                sample_counts[component_id]++;
+            }
+        }
+    }
+
+    /* Parallel max-finding phase with manual reduction */
+    int32_t most_frequent_id = 0;
+    int32_t max_count = 0;
+
+#pragma omp parallel
+    {
+        /* Each thread finds local maximum */
+        int32_t local_max_id = 0;
+        int32_t local_max_count = 0;
+
+#pragma omp for schedule(static) nowait
+        for (int32_t i = 0; i < num_vertices; i++) {
+            if (sample_counts[i] > local_max_count) {
+                local_max_count = sample_counts[i];
+                local_max_id = i;
+            }
+        }
+
+        /* Combine thread-local results */
+#pragma omp critical
+        {
+            if (local_max_count > max_count) {
+                max_count = local_max_count;
+                most_frequent_id = local_max_id;
+            }
+        }
+    }
+
+    /* Calculate and print percentage */
+    const float percentage = (float)max_count / (float)num_samples * 100.0f;
+    printf("Skipping largest intermediate component (ID: %d, approx. %.1f%% of the graph)\n",
+           most_frequent_id, percentage);
+
+    free(sample_counts);
+    return most_frequent_id;
 }
 
 

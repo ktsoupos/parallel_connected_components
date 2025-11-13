@@ -3,7 +3,6 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <stdio.h>
-#include <time.h>
 
 int32_t count_unique_labels(const int32_t* labels, const int32_t num_vertices) {
     if (labels == NULL || num_vertices <= 0) {
@@ -94,58 +93,4 @@ void print_component_stats(const int32_t* labels, const int32_t num_vertices) {
     free(component_sizes);
 }
 
-int32_t sample_frequent_element(const int32_t *comp, int32_t num_vertices, int32_t num_samples) {
-    if (comp == NULL || num_vertices <= 0 || num_samples <= 0) {
-        fprintf(stderr, "Error: Invalid parameters for sample_frequent_element\n");
-        return -1;
-    }
 
-    /* Allocate counter array for tracking sample counts */
-    int32_t *sample_counts = calloc((size_t)num_vertices, sizeof(int32_t));
-    if (sample_counts == NULL) {
-        fprintf(stderr, "Error: Failed to allocate sample_counts array\n");
-        return -1;
-    }
-
-    /* Seed random number generator (use time + address for better randomness) */
-    static bool seeded = false;
-    if (!seeded) {
-        srand((unsigned int)(time(NULL) ^ (time_t)(uintptr_t)comp));
-        seeded = true;
-    }
-
-    /* Sample random elements from comp array */
-    for (int32_t i = 0; i < num_samples; i++) {
-        /* Generate random index in range [0, num_vertices) */
-        int32_t idx = rand() % num_vertices;
-        int32_t component_id = comp[idx];
-
-        /* Bounds check to prevent heap corruption */
-        if (component_id < 0 || component_id >= num_vertices) {
-            fprintf(stderr, "Error: Invalid component ID %d at index %d\n", component_id, idx);
-            free(sample_counts);
-            return -1;
-        }
-
-        sample_counts[component_id]++;
-    }
-
-    /* Find the most frequent element */
-    int32_t most_frequent_id = 0;
-    int32_t max_count = sample_counts[0];
-
-    for (int32_t i = 1; i < num_vertices; i++) {
-        if (sample_counts[i] > max_count) {
-            max_count = sample_counts[i];
-            most_frequent_id = i;
-        }
-    }
-
-    /* Calculate and print percentage */
-    float percentage = (float)max_count / (float)num_samples * 100.0f;
-    printf("Skipping largest intermediate component (ID: %d, approx. %.1f%% of the graph)\n",
-           most_frequent_id, percentage);
-
-    free(sample_counts);
-    return most_frequent_id;
-}
