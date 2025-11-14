@@ -424,7 +424,7 @@ static void compress(int32_t *restrict parents, int32_t num_vertices) {
  * Parallel version of sample_frequent_element
  * Uses OpenMP to parallelize both sampling and max-finding
  */
-int32_t sample_frequent_element(const int32_t *comp, int32_t num_vertices, int32_t num_samples) {
+int32_t sample_frequent_element(const int32_t *comp, const int32_t num_vertices, const int32_t num_samples) {
     if (comp == NULL || num_vertices <= 0 || num_samples <= 0) {
         fprintf(stderr, "Error: Invalid parameters for sample_frequent_element\n");
         return -1;
@@ -499,6 +499,46 @@ int32_t sample_frequent_element(const int32_t *comp, int32_t num_vertices, int32
     return most_frequent_id;
 }
 
+static int32_t count_unique_labels_openmp(const int32_t* labels, const int32_t num_vertices) {
+    if (labels == NULL || num_vertices <= 0) {
+        return -1;
+    }
+
+    // Sequential bounds check
+    for (int32_t v = 0; v < num_vertices; v++) {
+        int32_t label = labels[v];
+        if (label < 0 || label >= num_vertices) {
+            fprintf(stderr, "Error: Invalid label %d at index %d (range 0-%d)\n",
+                    label, v, num_vertices - 1);
+            return -1;
+        }
+    }
+
+    bool* seen = calloc((size_t)num_vertices, sizeof(bool));
+    if (seen == NULL) {
+        fprintf(stderr, "Error: Failed to allocate seen array\n");
+        return -1;
+    }
+
+    int32_t count = 0;
+
+#pragma omp parallel for default(none) shared(labels, num_vertices, seen, count) schedule(static)
+    for (int32_t v = 0; v < num_vertices; v++) {
+        int32_t label = labels[v];
+
+        // benign race: multiple threads may write 'true', which is safe
+        if (!seen[label]) {
+            seen[label] = true;
+
+            // safe increment using atomic
+#pragma omp atomic
+            count++;
+        }
+    }
+
+    free(seen);
+    return count;
+}
 
 CCResult *afforest(const Graph *restrict g, int num_threads, int32_t neighbor_rounds) {
     /* Check arguments */
@@ -580,7 +620,7 @@ CCResult *afforest(const Graph *restrict g, int num_threads, int32_t neighbor_ro
     result->num_iterations = neighbor_rounds + 1; // Sampling rounds + final phase
 
     /* Count connected components */
-    result->num_components = count_unique_labels(result->labels, num_vertices);
+    result->num_components = count_unique_labels_openmp(result->labels, num_vertices);
     if (result->num_components < 0) {
         fprintf(stderr, "Error: Failed to count components\n");
         free(result->labels);

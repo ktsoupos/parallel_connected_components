@@ -9,6 +9,28 @@
 #include "cc_openmp.h"
 #endif
 
+#ifdef __cilk
+#include "benchmark_opencilk.h"
+#include <cilk/cilk.h>
+#include <unistd.h>
+
+/**
+ * Get number of Cilk workers from environment or return default
+ */
+static int get_cilk_workers(void) {
+    const char* workers_env = getenv("CILK_NWORKERS");
+    if (workers_env != NULL) {
+        const int workers = atoi(workers_env);
+        if (workers > 0) {
+            return workers;
+        }
+    }
+    // Default to number of processors if not set
+    const long nprocs = sysconf(_SC_NPROCESSORS_ONLN);
+    return (nprocs > 0) ? (int)nprocs : 1;
+}
+#endif
+
 int main(const int argc, char **argv) {
     if (argc < 2) {
         fprintf(stderr, "Usage: %s <graph.mtx> [report_interval]\n", argv[0]);
@@ -33,7 +55,9 @@ int main(const int argc, char **argv) {
         report_interval = (int32_t) val;
     }
 
-#ifdef _OPENMP
+#ifdef __cilk
+    printf("=== Connected Components - OpenCilk Parallel Version ===\n\n");
+#elif defined(_OPENMP)
     printf("=== Connected Components - OpenMP Parallel Version ===\n\n");
 #else
     printf("=== Connected Components - Sequential Version ===\n\n");
@@ -46,8 +70,16 @@ int main(const int argc, char **argv) {
         return EXIT_FAILURE;
     }
 
-#ifdef _OPENMP
-    /* Run parallel benchmarks with default number of threads */
+#ifdef __cilk
+    /* Run OpenCilk parallel benchmarks */
+    const int num_workers = get_cilk_workers();
+    const int result = run_opencilk_benchmarks(g, num_workers);
+    if (result != 0) {
+        graph_destroy(g);
+        return EXIT_FAILURE;
+    }
+#elif defined(_OPENMP)
+    /* Run OpenMP parallel benchmarks with default number of threads */
     const int num_threads = get_omp_threads();
     const int result = run_parallel_benchmarks(g, num_threads);
     if (result != 0) {
