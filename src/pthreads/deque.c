@@ -75,7 +75,7 @@ Task* deque_steal_top(Deque* dq)
         return NULL;
     }
 
-    int64_t top = atomic_load_explicit(&dq->top, memory_order_acquire);
+    const int64_t top = atomic_load_explicit(&dq->top, memory_order_acquire);
     atomic_thread_fence(memory_order_seq_cst);
     const int64_t bottom = atomic_load_explicit(&dq->bottom, memory_order_acquire);
 
