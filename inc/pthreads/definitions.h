@@ -39,8 +39,10 @@ struct ThreadPool {
     pthread_t *threads;                // 8 bytes - thread handles
     _Atomic(int64_t) active_tasks;     // 8 bytes - tasks in system
     pthread_barrier_t start_barrier;   // 32 bytes (typical x86_64) - sync start
+    pthread_mutex_t tasks_done_mutex;  // 40 bytes (typical x86_64) - for condition variable
+    pthread_cond_t tasks_done_cond;    // 48 bytes (typical x86_64) - signal task completion
     int32_t num_workers;               // 4 bytes - number of workers
-    _Atomic(bool) shutdown;            // 1 byte - shutdown signal
-    char pad[3];                       // padding: 64 - (8+8+8+32+4+1) = 3 bytes
+    _Atomic(int8_t) shutdown;          // 1 byte - shutdown signal (0=running, 1=shutdown)
+    char pad[35];                      // padding: 192 - (8+8+8+32+40+48+4+1) = 43 bytes
 } __attribute__((aligned(64)));
 

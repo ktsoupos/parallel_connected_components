@@ -5,7 +5,7 @@
  * Create a thread pool with num_workers threads
  * Each worker gets a deque with deque_capacity
  */
-ThreadPool *threadpool_create(int num_workers, int deque_capacity);
+ThreadPool *threadpool_create(int32_t num_workers, int64_t deque_capacity);
 
 /**
  * Start all worker threads

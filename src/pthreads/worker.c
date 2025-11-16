@@ -138,7 +138,15 @@ void worker_main_loop(Worker *worker, ThreadPool *pool) {
                 task->func(task); // execute task
             }
             free(task);
-            atomic_fetch_sub_explicit(&pool->active_tasks, 1, memory_order_release);
+            // If that was the last task, signal waiters
+            const int64_t remaining = atomic_fetch_sub_explicit(&pool->active_tasks,
+                                                          1, memory_order_release) - 1;
+            if (remaining == 0) {
+                pthread_mutex_lock(&pool->tasks_done_mutex);
+                pthread_cond_broadcast(&pool->tasks_done_cond);
+                pthread_mutex_unlock(&pool->tasks_done_mutex);
+            }
+
             idle_count = 0; // Track how long we've been idle
 
         } else {
