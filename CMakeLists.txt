@@ -21,7 +21,10 @@ set(CMAKE_C_FLAGS_RELEASE "-O3 -DNDEBUG")
 set(CMAKE_C_FLAGS_DEBUG "-g -O0 -DDEBUG")
 
 # Include directories
-include_directories(inc)
+include_directories(
+        inc
+        inc/pthreads
+)
 
 # Sequential version
 add_executable(cc_sequential
@@ -151,5 +154,29 @@ else()
     message(WARNING "OpenCilk compiler not found at /opt/opencilk/bin/clang")
 endif()
 
-# TODO: Add other parallel versions later
-# - cc_pthreads
+# Pthreads parallel version
+find_package(Threads REQUIRED)
+if(Threads_FOUND)
+    message(STATUS "Pthreads found")
+
+    # Pthreads parallel version
+    add_executable(cc_pthreads
+        src/main.c
+        src/graph.c
+        src/mtx_reader.c
+        src/cc_common.c
+        src/cc_sequential.c
+#        src/cc_pthreads.c
+        src/pthreads/deque.c
+        benchmarks/benchmark_sequential.c
+#        benchmarks/benchmark_pthreads.c
+    )
+
+    # Link Pthreads and math library
+    target_link_libraries(cc_pthreads Threads::Threads m)
+
+    # Add pthread-specific compiler flags
+    target_compile_options(cc_pthreads PRIVATE -pthread)
+else()
+    message(WARNING "Pthreads not found - cc_pthreads target will not be built")
+endif()
