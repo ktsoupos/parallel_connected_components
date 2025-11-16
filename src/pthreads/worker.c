@@ -102,7 +102,7 @@ int32_t worker_select_victim(Worker *w, const int32_t num_workers) {
 
 
 void *worker_thread_func(void *arg) {
-    const Worker *worker = (Worker *)arg;
+    Worker *worker = (Worker *)arg;
     ThreadPool *pool = worker->pool;
 
     pthread_barrier_wait(&pool->start_barrier);
@@ -112,7 +112,7 @@ void *worker_thread_func(void *arg) {
     return NULL;
 }
 
-void worker_main_loop(const Worker *worker, ThreadPool *pool) {
+void worker_main_loop(Worker *worker, ThreadPool *pool) {
     if (worker == NULL || pool == NULL) {
         return;
     }
