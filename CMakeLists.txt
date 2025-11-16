@@ -166,18 +166,20 @@ if (Threads_FOUND)
             src/mtx_reader.c
             src/cc_common.c
             src/cc_sequential.c
-            #        src/cc_pthreads.c
             src/pthreads/deque.c
             src/pthreads/worker.c
+            src/pthreads/threadpool.c
+            src/pthreads/cc_pthreads.c
             benchmarks/benchmark_sequential.c
-            #        benchmarks/benchmark_pthreads.c
+            benchmarks/benchmark_pthreads.c
     )
 
     # Link Pthreads and math library
     target_link_libraries(cc_pthreads Threads::Threads m)
 
-    # Add pthread-specific compiler flags
+    # Add pthread-specific compiler flags and define
     target_compile_options(cc_pthreads PRIVATE -pthread)
+    target_compile_definitions(cc_pthreads PRIVATE USE_PTHREADS)
 else ()
     message(WARNING "Pthreads not found - cc_pthreads target will not be built")
 endif ()

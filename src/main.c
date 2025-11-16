@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
+#include <unistd.h>
 #include "graph.h"
 #include "mtx_reader.h"
 #include "benchmark.h"
@@ -12,7 +13,6 @@
 #ifdef __cilk
 #include "benchmark_opencilk.h"
 #include <cilk/cilk.h>
-#include <unistd.h>
 
 /**
  * Get number of Cilk workers from environment or return default
@@ -30,6 +30,22 @@ static int get_cilk_workers(void) {
     return (nprocs > 0) ? (int)nprocs : 1;
 }
 #endif
+
+/**
+ * Get number of threads for pthreads from environment or return default
+ */
+static int get_num_threads(void) {
+    const char* threads_env = getenv("NUM_THREADS");
+    if (threads_env != NULL) {
+        const int threads = atoi(threads_env);
+        if (threads > 0) {
+            return threads;
+        }
+    }
+    // Default to number of processors if not set
+    const long nprocs = sysconf(_SC_NPROCESSORS_ONLN);
+    return (nprocs > 0) ? (int)nprocs : 1;
+}
 
 int main(const int argc, char **argv) {
     if (argc < 2) {
@@ -59,6 +75,8 @@ int main(const int argc, char **argv) {
     printf("=== Connected Components - OpenCilk Parallel Version ===\n\n");
 #elif defined(_OPENMP)
     printf("=== Connected Components - OpenMP Parallel Version ===\n\n");
+#elif defined(USE_PTHREADS)
+    printf("=== Connected Components - Pthreads Work-Stealing Version ===\n\n");
 #else
     printf("=== Connected Components - Sequential Version ===\n\n");
 #endif
@@ -82,6 +100,14 @@ int main(const int argc, char **argv) {
     /* Run OpenMP parallel benchmarks with default number of threads */
     const int num_threads = get_omp_threads();
     const int result = run_parallel_benchmarks(g, num_threads);
+    if (result != 0) {
+        graph_destroy(g);
+        return EXIT_FAILURE;
+    }
+#elif defined(USE_PTHREADS)
+    /* Run pthreads work-stealing benchmarks */
+    const int num_threads = get_num_threads();
+    const int result = run_pthreads_benchmarks(g, num_threads);
     if (result != 0) {
         graph_destroy(g);
         return EXIT_FAILURE;

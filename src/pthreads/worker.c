@@ -13,6 +13,10 @@
 
 #define NUM_STEAL_MAX_ATTEMPTS 3
 
+// Thread-local storage: each thread knows which worker it is
+static __thread Worker *current_worker = NULL;
+static __thread ThreadPool *current_pool = NULL;
+
 
 // XORShift64 - fast, simple PRNG for per-worker random numbers
 static inline uint64_t xorshift64(uint64_t *state) {
@@ -116,6 +120,11 @@ void worker_main_loop(Worker *worker, ThreadPool *pool) {
     if (worker == NULL || pool == NULL) {
         return;
     }
+
+    // Set thread-local storage so tasks can access worker/pool
+    current_worker = worker;
+    current_pool = pool;
+
     int idle_count = 0; // Track how long we've been idle
 
     while (!atomic_load_explicit(&pool->shutdown, memory_order_acquire)) {
@@ -151,13 +160,33 @@ void worker_main_loop(Worker *worker, ThreadPool *pool) {
 
         } else {
             idle_count++;
-            worker_backoff(idle_count);
+
+            // Check if there are no tasks in the system
             if (atomic_load_explicit(&pool->active_tasks, memory_order_acquire) == 0) {
-                // Give others a chance, then check again
-                worker_backoff(1);
-                if (atomic_load_explicit(&pool->active_tasks, memory_order_acquire) == 0) {
-                    break; // No work in system, exit
+                // Check if we should wait or exit
+                if (atomic_load_explicit(&pool->barrier_waiting, memory_order_acquire)) {
+                    // Barrier mode - wait for new tasks
+                    pthread_mutex_lock(&pool->idle_mutex);
+
+                    // Double-check with lock held
+                    if (atomic_load_explicit(&pool->active_tasks, memory_order_acquire) == 0 &&
+                        !atomic_load_explicit(&pool->shutdown, memory_order_acquire)) {
+                        // Wait for signal (new tasks or shutdown)
+                        pthread_cond_wait(&pool->idle_cond, &pool->idle_mutex);
+                    }
+
+                    pthread_mutex_unlock(&pool->idle_mutex);
+                    idle_count = 0;  // Reset idle count after waking
+                } else {
+                    // Non-barrier mode - backoff and potentially exit
+                    worker_backoff(1);
+                    if (atomic_load_explicit(&pool->active_tasks, memory_order_acquire) == 0) {
+                        break; // No work in system, exit
+                    }
                 }
+            } else {
+                // Still tasks in system, just backoff a bit
+                worker_backoff(idle_count);
             }
         }
     }
@@ -186,4 +215,12 @@ void worker_backoff(int idle_count) {
         };
         nanosleep(&ts, NULL);
     }
+}
+
+Worker* worker_current(void) {
+    return current_worker;
+}
+
+ThreadPool* worker_current_pool(void) {
+    return current_pool;
 }

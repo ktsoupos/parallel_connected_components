@@ -13,9 +13,23 @@ ThreadPool *threadpool_create(int32_t num_workers, int64_t deque_capacity);
 void threadpool_start(ThreadPool *pool);
 
 /**
- * Wait for all tasks to complete
+ * Wait for all tasks to complete (and shutdown threads)
+ * Use this for final cleanup
  */
 void threadpool_wait(ThreadPool *pool);
+
+/**
+ * Wait for all tasks to complete (barrier)
+ * Keeps threads alive for next iteration
+ * Use this between iterations in iterative algorithms
+ */
+void threadpool_barrier(ThreadPool *pool);
+
+/**
+ * Wake idle workers after submitting new tasks
+ * Call this after adding tasks to worker deques
+ */
+void threadpool_wake_workers(ThreadPool *pool);
 
 /**
  * Shutdown the thread pool and join all threads

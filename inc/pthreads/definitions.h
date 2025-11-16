@@ -9,7 +9,7 @@ typedef struct Task {
     void (*func)(struct Task *t); // function to execute this task
     int64_t start_vertex;         // first vertex in this chunk
     int64_t end_vertex;           // one past the last vertex
-    void *graph;                  // pointer to graph data
+    void *context;                // generic context pointer for task-specific data
     char pad[32];                 // padding: 64 - (8+8+8+8) = 32 bytes
 } Task __attribute__((aligned(64)));
 
@@ -41,8 +41,11 @@ struct ThreadPool {
     pthread_barrier_t start_barrier;   // 32 bytes (typical x86_64) - sync start
     pthread_mutex_t tasks_done_mutex;  // 40 bytes (typical x86_64) - for condition variable
     pthread_cond_t tasks_done_cond;    // 48 bytes (typical x86_64) - signal task completion
+    pthread_mutex_t idle_mutex;        // 40 bytes - for idle condition variable
+    pthread_cond_t idle_cond;          // 48 bytes - wake idle workers when new tasks arrive
     int32_t num_workers;               // 4 bytes - number of workers
     _Atomic(int8_t) shutdown;          // 1 byte - shutdown signal (0=running, 1=shutdown)
-    char pad[35];                      // padding: 192 - (8+8+8+32+40+48+4+1) = 43 bytes
+    _Atomic(int8_t) barrier_waiting;   // 1 byte - workers should wait at barrier (not exit)
+    char pad[2];                       // padding: 256 - (8+8+8+32+40+48+40+48+4+1+1) = 18 bytes
 } __attribute__((aligned(64)));
 

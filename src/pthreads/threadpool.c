@@ -35,11 +35,14 @@ ThreadPool *threadpool_create(int32_t num_workers, int64_t deque_capacity) {
     // 6. Initialize atomics
     atomic_init(&pool->active_tasks, 0);
     atomic_init(&pool->shutdown, false);
+    atomic_init(&pool->barrier_waiting, true);  // Start in barrier mode
 
     // 7. Initialize barrier (all workers)
     pthread_barrier_init(&pool->start_barrier, NULL, (uint32_t)num_workers);
     pthread_mutex_init(&pool->tasks_done_mutex, NULL);
     pthread_cond_init(&pool->tasks_done_cond, NULL);
+    pthread_mutex_init(&pool->idle_mutex, NULL);
+    pthread_cond_init(&pool->idle_cond, NULL);
 
     return pool;
 }
@@ -83,6 +86,35 @@ void threadpool_wait(ThreadPool *pool) {
     }
 }
 
+void threadpool_barrier(ThreadPool *pool) {
+    if (!pool)
+        return;
+
+    // Wait for all active tasks to complete
+    while (atomic_load(&pool->active_tasks) > 0) {
+        pthread_mutex_lock(&pool->tasks_done_mutex);
+
+        if (atomic_load(&pool->active_tasks) > 0) {
+            pthread_cond_wait(&pool->tasks_done_cond,
+                              &pool->tasks_done_mutex);
+        }
+
+        pthread_mutex_unlock(&pool->tasks_done_mutex);
+    }
+
+    // Don't shutdown - threads stay alive for next iteration
+}
+
+void threadpool_wake_workers(ThreadPool *pool) {
+    if (!pool)
+        return;
+
+    // Signal all idle workers that new tasks are available
+    pthread_mutex_lock(&pool->idle_mutex);
+    pthread_cond_broadcast(&pool->idle_cond);
+    pthread_mutex_unlock(&pool->idle_mutex);
+}
+
 void threadpool_shutdown(ThreadPool *pool) {
     if (pool == NULL) {
         return;
@@ -91,7 +123,12 @@ void threadpool_shutdown(ThreadPool *pool) {
     // Signal all workers to stop
     atomic_store(&pool->shutdown, 1);
 
-    // Broadcast to wake up any waiting threads
+    // Wake up idle workers so they can see shutdown flag
+    pthread_mutex_lock(&pool->idle_mutex);
+    pthread_cond_broadcast(&pool->idle_cond);
+    pthread_mutex_unlock(&pool->idle_mutex);
+
+    // Also wake any waiting on tasks_done
     pthread_mutex_lock(&pool->tasks_done_mutex);
     pthread_cond_broadcast(&pool->tasks_done_cond);
     pthread_mutex_unlock(&pool->tasks_done_mutex);
@@ -116,6 +153,8 @@ void threadpool_destroy(ThreadPool *pool) {
     pthread_barrier_destroy(&pool->start_barrier);
     pthread_mutex_destroy(&pool->tasks_done_mutex);
     pthread_cond_destroy(&pool->tasks_done_cond);
+    pthread_mutex_destroy(&pool->idle_mutex);
+    pthread_cond_destroy(&pool->idle_cond);
 
     // Free arrays
     free(pool->workers);
