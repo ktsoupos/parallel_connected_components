@@ -167,18 +167,9 @@ void worker_main_loop(Worker *worker, ThreadPool *pool) {
             if (atomic_load_explicit(&pool->active_tasks, memory_order_acquire) == 0) {
                 // Check if we should wait or exit
                 if (atomic_load_explicit(&pool->barrier_waiting, memory_order_acquire)) {
-                    // Barrier mode - wait for new tasks
-                    pthread_mutex_lock(&pool->idle_mutex);
-
-                    // Double-check with lock held
-                    if (atomic_load_explicit(&pool->active_tasks, memory_order_acquire) == 0 &&
-                        !atomic_load_explicit(&pool->shutdown, memory_order_acquire)) {
-                        // Wait for signal (new tasks or shutdown)
-                        pthread_cond_wait(&pool->idle_cond, &pool->idle_mutex);
-                    }
-
-                    pthread_mutex_unlock(&pool->idle_mutex);
-                    idle_count = 0; // Reset idle count after waking
+                    // Barrier mode - synchronize with main thread at barrier
+                    pthread_barrier_wait(&pool->iter_barrier);
+                    idle_count = 0; // Reset idle count
                 } else {
                     // Non-barrier mode - backoff and potentially exit
                     worker_backoff(1);

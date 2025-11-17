@@ -170,6 +170,7 @@ if (Threads_FOUND)
             src/pthreads/worker.c
             src/pthreads/threadpool.c
             src/pthreads/cc_pthreads.c
+            src/pthreads/cc_afforest.c
             benchmarks/benchmark_sequential.c
             benchmarks/benchmark_pthreads.c
     )

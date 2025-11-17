@@ -5,6 +5,7 @@
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 
 ThreadPool *threadpool_create(int32_t num_workers, int64_t deque_capacity) {
     if (num_workers <= 0 || deque_capacity <= 0) {
@@ -37,12 +38,11 @@ ThreadPool *threadpool_create(int32_t num_workers, int64_t deque_capacity) {
     atomic_init(&pool->shutdown, false);
     atomic_init(&pool->barrier_waiting, true);  // Start in barrier mode
 
-    // 7. Initialize barrier (all workers)
+    // 7. Initialize barriers
     pthread_barrier_init(&pool->start_barrier, NULL, (uint32_t)num_workers);
+    pthread_barrier_init(&pool->iter_barrier, NULL, (uint32_t)(num_workers + 1)); // +1 for main
     pthread_mutex_init(&pool->tasks_done_mutex, NULL);
     pthread_cond_init(&pool->tasks_done_cond, NULL);
-    pthread_mutex_init(&pool->idle_mutex, NULL);
-    pthread_cond_init(&pool->idle_cond, NULL);
 
     return pool;
 }
@@ -90,29 +90,22 @@ void threadpool_barrier(ThreadPool *pool) {
     if (!pool)
         return;
 
-    // Wait for all active tasks to complete
+    // First, wait for all tasks to complete
     while (atomic_load(&pool->active_tasks) > 0) {
         pthread_mutex_lock(&pool->tasks_done_mutex);
-
         if (atomic_load(&pool->active_tasks) > 0) {
-            pthread_cond_wait(&pool->tasks_done_cond,
-                              &pool->tasks_done_mutex);
+            pthread_cond_wait(&pool->tasks_done_cond, &pool->tasks_done_mutex);
         }
-
         pthread_mutex_unlock(&pool->tasks_done_mutex);
     }
 
-    // Don't shutdown - threads stay alive for next iteration
+    // Then synchronize with all workers at barrier
+    pthread_barrier_wait(&pool->iter_barrier);
 }
 
 void threadpool_wake_workers(ThreadPool *pool) {
-    if (!pool)
-        return;
-
-    // Signal all idle workers that new tasks are available
-    pthread_mutex_lock(&pool->idle_mutex);
-    pthread_cond_broadcast(&pool->idle_cond);
-    pthread_mutex_unlock(&pool->idle_mutex);
+    // No-op with pthread_barrier - workers wake when barrier releases
+    (void)pool;
 }
 
 void threadpool_shutdown(ThreadPool *pool) {
@@ -122,13 +115,9 @@ void threadpool_shutdown(ThreadPool *pool) {
 
     // Signal all workers to stop
     atomic_store(&pool->shutdown, 1);
+    atomic_store(&pool->barrier_waiting, 0); // Exit barrier mode
 
-    // Wake up idle workers so they can see shutdown flag
-    pthread_mutex_lock(&pool->idle_mutex);
-    pthread_cond_broadcast(&pool->idle_cond);
-    pthread_mutex_unlock(&pool->idle_mutex);
-
-    // Also wake any waiting on tasks_done
+    // Wake any waiting on tasks_done
     pthread_mutex_lock(&pool->tasks_done_mutex);
     pthread_cond_broadcast(&pool->tasks_done_cond);
     pthread_mutex_unlock(&pool->tasks_done_mutex);
@@ -151,10 +140,9 @@ void threadpool_destroy(ThreadPool *pool) {
 
     // Destroy synchronization primitives
     pthread_barrier_destroy(&pool->start_barrier);
+    pthread_barrier_destroy(&pool->iter_barrier);
     pthread_mutex_destroy(&pool->tasks_done_mutex);
     pthread_cond_destroy(&pool->tasks_done_cond);
-    pthread_mutex_destroy(&pool->idle_mutex);
-    pthread_cond_destroy(&pool->idle_cond);
 
     // Free arrays
     free(pool->workers);
