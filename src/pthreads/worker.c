@@ -116,6 +116,15 @@ void *worker_thread_func(void *arg) {
     return NULL;
 }
 
+static bool deque_is_all_empty(ThreadPool *pool) {
+    for (int i = 0; i < pool->num_workers; i++) {
+        int64_t top = atomic_load(&pool->workers[i].deque.top);
+        int64_t bottom = atomic_load(&pool->workers[i].deque.bottom);
+        if (bottom > top) return false;
+    }
+    return true;
+}
+
 void worker_main_loop(struct Worker *worker, struct ThreadPool *pool) {
     current_worker = worker;
     current_pool = pool;
@@ -123,6 +132,7 @@ void worker_main_loop(struct Worker *worker, struct ThreadPool *pool) {
     int idle_count = 0;
 
     while (!atomic_load_explicit(&pool->shutdown, memory_order_acquire)) {
+
         Task *task = deque_pop_bottom(&worker->deque);
 
         if (!task) {
@@ -137,31 +147,40 @@ void worker_main_loop(struct Worker *worker, struct ThreadPool *pool) {
         }
 
         if (task) {
+            // Do work
             if (task->func) task->func(task);
 
-            // Update active_tasks and notify main thread
-            int64_t remaining = atomic_fetch_sub_explicit(&pool->active_tasks, 1, memory_order_release) - 1;
-            if (remaining == 0) {
+            // decrement active_tasks
+            int64_t prev = atomic_fetch_sub_explicit(
+                &pool->active_tasks, 1, memory_order_acq_rel
+            );
+
+            // signal main thread IF we reached 0
+            if (prev == 1) {
                 pthread_mutex_lock(&pool->tasks_done_mutex);
                 pthread_cond_broadcast(&pool->tasks_done_cond);
                 pthread_mutex_unlock(&pool->tasks_done_mutex);
             }
 
             idle_count = 0;
-        } else {
-            idle_count++;
-
-            // Wait for new tasks or shutdown
-            pthread_mutex_lock(&pool->tasks_done_mutex);
-            if (atomic_load(&pool->active_tasks) > 0) {
-                pthread_cond_wait(&pool->tasks_done_cond, &pool->tasks_done_mutex);
-            }
-            pthread_mutex_unlock(&pool->tasks_done_mutex);
-
-            worker_backoff(idle_count);
+            continue;
         }
+
+        pthread_mutex_lock(&pool->work_mutex);
+
+        while (!atomic_load_explicit(&pool->shutdown, memory_order_acquire) &&
+               atomic_load_explicit(&pool->active_tasks, memory_order_acquire) == 0 &&
+               deque_is_all_empty(pool))
+        {
+            pthread_cond_wait(&pool->work_available, &pool->work_mutex);
+        }
+
+        pthread_mutex_unlock(&pool->work_mutex);
+
+        worker_backoff(++idle_count);
     }
 }
+
 
 void worker_backoff(int idle_count) {
     if (idle_count < 10) {

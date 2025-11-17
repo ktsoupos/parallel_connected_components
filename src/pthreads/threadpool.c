@@ -71,7 +71,7 @@ void threadpool_wait(ThreadPool *pool) {
         return;
 
     pthread_mutex_lock(&pool->tasks_done_mutex);
-    while (atomic_load(&pool->active_tasks) > 0) {
+    while (atomic_load_explicit(&pool->active_tasks, memory_order_acquire) > 0) {
         pthread_cond_wait(&pool->tasks_done_cond, &pool->tasks_done_mutex);
     }
     pthread_mutex_unlock(&pool->tasks_done_mutex);
@@ -91,7 +91,7 @@ void threadpool_barrier(ThreadPool *pool) {
     }
 
     // Then synchronize with all workers at barrier
-    pthread_barrier_wait(&pool->iter_barrier);
+    // pthread_barrier_wait(&pool->iter_barrier);
 }
 
 void threadpool_wake_workers(ThreadPool *pool) {
@@ -105,16 +105,16 @@ void threadpool_wake_workers(ThreadPool *pool) {
 
 
 void threadpool_shutdown(ThreadPool *pool) {
-    if (!pool)
-        return;
+    atomic_store_explicit(&pool->shutdown, 1, memory_order_release);
 
-    atomic_store(&pool->shutdown, 1);
-    threadpool_wake_workers(pool);
+    pthread_mutex_lock(&pool->work_mutex);
+    pthread_cond_broadcast(&pool->work_available);
+    pthread_mutex_unlock(&pool->work_mutex);
 
-    for (int i = 0; i < pool->num_workers; i++) {
+    for (int i = 0; i < pool->num_workers; i++)
         pthread_join(pool->threads[i], NULL);
-    }
 }
+
 
 void threadpool_destroy(ThreadPool *pool) {
     if (pool == NULL) {
