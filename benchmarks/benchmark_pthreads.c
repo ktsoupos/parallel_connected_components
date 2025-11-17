@@ -38,65 +38,89 @@ int run_pthreads_benchmarks(const Graph* g, int num_threads) {
     printf("Sequential UF completed in %.5f seconds\n", elapsed_seq);
     cc_result_print_stats(result_seq, g);
 
-    /* Run Afforest Simple with pthreads */
-    printf("\n=== Parallel Afforest (Pthreads) ===\n");
-    struct timespec start_afforest_simple, end_afforest_simple;
-    clock_gettime(CLOCK_MONOTONIC, &start_afforest_simple);
-    CCResult* result_afforest_simple = afforest_simple_pthreads(g, num_threads, 2);
-    clock_gettime(CLOCK_MONOTONIC, &end_afforest_simple);
+    /* Run Afforest Simple with pthreads - STATIC SCHEDULING */
+    printf("\n=== Parallel Afforest (Pthreads - Static Scheduling) ===\n");
+    struct timespec start_static, end_static;
+    clock_gettime(CLOCK_MONOTONIC, &start_static);
+    CCResult* result_static = afforest_simple_pthreads(g, num_threads, 2, false);
+    clock_gettime(CLOCK_MONOTONIC, &end_static);
 
-    if (result_afforest_simple == NULL) {
-        fprintf(stderr, "Error: Afforest failed\n");
+    if (result_static == NULL) {
+        fprintf(stderr, "Error: Afforest static failed\n");
         cc_result_destroy(result_seq);
         return -1;
     }
 
-    const double elapsed_afforest_simple = (end_afforest_simple.tv_sec - start_afforest_simple.tv_sec) +
-                                           (end_afforest_simple.tv_nsec - start_afforest_simple.tv_nsec) / 1e9;
-    printf("Parallel Afforest completed in %.5f seconds\n", elapsed_afforest_simple);
-    cc_result_print_stats(result_afforest_simple, g);
+    const double elapsed_static = (end_static.tv_sec - start_static.tv_sec) +
+                                  (end_static.tv_nsec - start_static.tv_nsec) / 1e9;
+    printf("Static scheduling completed in %.5f seconds\n", elapsed_static);
+    cc_result_print_stats(result_static, g);
+
+    /* Run Afforest Simple with pthreads - DYNAMIC SCHEDULING */
+    printf("\n=== Parallel Afforest (Pthreads - Dynamic Scheduling) ===\n");
+    struct timespec start_dynamic, end_dynamic;
+    clock_gettime(CLOCK_MONOTONIC, &start_dynamic);
+    CCResult* result_dynamic = afforest_simple_pthreads(g, num_threads, 2, true);
+    clock_gettime(CLOCK_MONOTONIC, &end_dynamic);
+
+    if (result_dynamic == NULL) {
+        fprintf(stderr, "Error: Afforest dynamic failed\n");
+        cc_result_destroy(result_seq);
+        cc_result_destroy(result_static);
+        return -1;
+    }
+
+    const double elapsed_dynamic = (end_dynamic.tv_sec - start_dynamic.tv_sec) +
+                                   (end_dynamic.tv_nsec - start_dynamic.tv_nsec) / 1e9;
+    printf("Dynamic scheduling completed in %.5f seconds\n", elapsed_dynamic);
+    cc_result_print_stats(result_dynamic, g);
 
     /* Verify correctness: compare component counts */
     printf("\n=== Correctness Verification ===\n");
-    bool afforest_correct = (result_seq->num_components == result_afforest_simple->num_components);
+    bool static_correct = (result_seq->num_components == result_static->num_components);
+    bool dynamic_correct = (result_seq->num_components == result_dynamic->num_components);
 
-    if (afforest_correct) {
-        printf("✓ Both algorithms found %d components\n", result_seq->num_components);
+    if (static_correct && dynamic_correct) {
+        printf("✓ All algorithms found %d components\n", result_seq->num_components);
     } else {
         printf("✗ WARNING: Component counts DIFFER\n");
         printf("  Sequential: %d components\n", result_seq->num_components);
-        printf("  Parallel:   %d components ✗\n", result_afforest_simple->num_components);
+        printf("  Static:     %d components %s\n", result_static->num_components, static_correct ? "✓" : "✗");
+        printf("  Dynamic:    %d components %s\n", result_dynamic->num_components, dynamic_correct ? "✓" : "✗");
     }
 
     /* Print performance comparison */
     printf("\n=== Performance Comparison ===\n");
-    printf("Sequential (UF edge reorder):       %.5f seconds\n", elapsed_seq);
-    printf("Parallel (Afforest, %d threads):    %.5f seconds (%d iterations)\n",
-           num_threads, elapsed_afforest_simple, result_afforest_simple->num_iterations);
+    printf("Sequential (UF edge reorder):           %.5f seconds\n", elapsed_seq);
+    printf("Parallel Static  (Afforest, %d threads): %.5f seconds (%d iterations)\n",
+           num_threads, elapsed_static, result_static->num_iterations);
+    printf("Parallel Dynamic (Afforest, %d threads): %.5f seconds (%d iterations)\n",
+           num_threads, elapsed_dynamic, result_dynamic->num_iterations);
 
-    /* Compute and print speedup */
+    /* Compute and print speedups */
     if (elapsed_seq > 0.0) {
-        const double speedup = elapsed_seq / elapsed_afforest_simple;
-        const double efficiency = speedup / (double)num_threads * 100.0;
+        const double speedup_static = elapsed_seq / elapsed_static;
+        const double speedup_dynamic = elapsed_seq / elapsed_dynamic;
+        const double efficiency_static = speedup_static / (double)num_threads * 100.0;
+        const double efficiency_dynamic = speedup_dynamic / (double)num_threads * 100.0;
 
-        printf("\nSpeedup vs sequential: %.2fx (%.1f%% efficiency)\n", speedup, efficiency);
+        printf("\nStatic  speedup: %.2fx (%.1f%% efficiency)\n", speedup_static, efficiency_static);
+        printf("Dynamic speedup: %.2fx (%.1f%% efficiency)\n", speedup_dynamic, efficiency_dynamic);
 
-        /* Performance categorization */
-        printf("Parallel scaling: ");
-        if (speedup >= (double)num_threads * 0.8) {
-            printf("Excellent!\n");
-        } else if (speedup >= (double)num_threads * 0.5) {
-            printf("Good\n");
-        } else if (speedup >= 2.0) {
-            printf("Moderate\n");
+        /* Dynamic vs Static comparison */
+        if (elapsed_dynamic < elapsed_static) {
+            const double improvement = (elapsed_static / elapsed_dynamic - 1.0) * 100.0;
+            printf("Dynamic is %.1f%% FASTER than static\n", improvement);
         } else {
-            printf("Limited (consider larger graphs or check for bottlenecks)\n");
+            const double slowdown = (elapsed_dynamic / elapsed_static - 1.0) * 100.0;
+            printf("Dynamic is %.1f%% slower than static\n", slowdown);
         }
     }
 
     /* Cleanup */
     cc_result_destroy(result_seq);
-    cc_result_destroy(result_afforest_simple);
+    cc_result_destroy(result_static);
+    cc_result_destroy(result_dynamic);
 
     return 0;
 }

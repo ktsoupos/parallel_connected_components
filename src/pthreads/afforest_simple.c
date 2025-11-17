@@ -36,6 +36,15 @@
 /* Cache line size for alignment (prevent false sharing) */
 #define CACHE_LINE_SIZE 64
 
+/* Chunk size for dynamic scheduling (tunable: 512-4096) */
+#define DYNAMIC_CHUNK_SIZE 2048
+
+/* Cache-aligned work counter for dynamic load balancing */
+typedef struct {
+    _Atomic int32_t next_chunk;
+    char padding[CACHE_LINE_SIZE - sizeof(_Atomic int32_t)];
+} work_counter_t;
+
 /* Global synchronization primitives */
 typedef struct {
     pthread_barrier_t barrier;
@@ -119,6 +128,8 @@ typedef struct {
     int32_t *parents;
     int32_t num_vertices;
     int32_t round;
+    work_counter_t *work_counter;  /* For dynamic scheduling */
+    bool use_dynamic;              /* Enable dynamic load balancing */
 } __attribute__((aligned(CACHE_LINE_SIZE))) neighbor_round_args_t;
 
 typedef struct {
@@ -131,6 +142,8 @@ typedef struct {
     int32_t largest_component;
     int32_t start_idx;
     int32_t end_idx;
+    work_counter_t *work_counter;  /* For dynamic scheduling */
+    bool use_dynamic;              /* Enable dynamic load balancing */
 } __attribute__((aligned(CACHE_LINE_SIZE))) final_phase_args_t;
 
 typedef struct {
@@ -596,7 +609,7 @@ static int32_t sample_frequent_element(const int32_t *comp, const int32_t num_ve
 }
 
 /**
- * Thread function for neighbor sampling rounds
+ * Thread function for neighbor sampling rounds (supports static and dynamic scheduling)
  */
 static void *neighbor_round_thread(void *arg) {
     neighbor_round_args_t *args = (neighbor_round_args_t *)arg;
@@ -604,48 +617,51 @@ static void *neighbor_round_thread(void *arg) {
     /* Pin thread to core for NUMA locality */
     pin_thread_to_core(args->thread_id);
 
-    /* Static scheduling */
-    const int32_t verts_per_thread = args->num_vertices / args->num_threads;
-    const int32_t start = args->thread_id * verts_per_thread;
-    int32_t end = start + verts_per_thread;
+    if (args->use_dynamic) {
+        /* === DYNAMIC SCHEDULING === */
+        const int32_t chunk_size = DYNAMIC_CHUNK_SIZE;
+        const int32_t num_chunks = (args->num_vertices + chunk_size - 1) / chunk_size;
 
-    /* Last thread takes remaining vertices */
-    if (args->thread_id == args->num_threads - 1) {
-        end = args->num_vertices;
-    }
+        while (1) {
+            /* Atomically grab next chunk */
+            const int32_t chunk_id = atomic_fetch_add(&args->work_counter->next_chunk, 1);
 
-    for (int32_t u = start; u < end; u++) {
-        int32_t num_neighbors = 0;
-        const int32_t *neighbors = graph_get_neighbors(args->g, u, &num_neighbors);
+            if (chunk_id >= num_chunks) break;  /* No more work */
 
-        if (neighbors != NULL && args->round < num_neighbors) {
-            const int32_t v = neighbors[args->round];
-            link_vertices(u, v, args->parents);
+            /* Calculate chunk boundaries */
+            const int32_t start = chunk_id * chunk_size;
+            const int32_t end = (start + chunk_size > args->num_vertices)
+                                ? args->num_vertices
+                                : start + chunk_size;
+
+            /* Process this chunk */
+            for (int32_t u = start; u < end; u++) {
+                int32_t num_neighbors = 0;
+                const int32_t *neighbors = graph_get_neighbors(args->g, u, &num_neighbors);
+
+                if (neighbors != NULL && args->round < num_neighbors) {
+                    const int32_t v = neighbors[args->round];
+                    link_vertices(u, v, args->parents);
+                }
+            }
         }
-    }
+    } else {
+        /* === STATIC SCHEDULING === */
+        const int32_t verts_per_thread = args->num_vertices / args->num_threads;
+        const int32_t start = args->thread_id * verts_per_thread;
+        int32_t end = start + verts_per_thread;
 
-    return NULL;
-}
+        /* Last thread takes remaining vertices */
+        if (args->thread_id == args->num_threads - 1) {
+            end = args->num_vertices;
+        }
 
-/**
- * Thread function for final phase (dynamic scheduling approximation)
- */
-static void *final_phase_thread(void *arg) {
-    final_phase_args_t *args = (final_phase_args_t *)arg;
+        for (int32_t u = start; u < end; u++) {
+            int32_t num_neighbors = 0;
+            const int32_t *neighbors = graph_get_neighbors(args->g, u, &num_neighbors);
 
-    /* Pin thread to core for NUMA locality */
-    pin_thread_to_core(args->thread_id);
-
-    for (int32_t u = args->start_idx; u < args->end_idx; u++) {
-        if (args->parents[u] == args->largest_component) continue;
-
-        int32_t num_neighbors = 0;
-        const int32_t *neighbors = graph_get_neighbors(args->g, u, &num_neighbors);
-
-        /* Process remaining neighbors (after neighbor_rounds) */
-        if (neighbors != NULL) {
-            for (int32_t j = args->neighbor_rounds; j < num_neighbors; j++) {
-                const int32_t v = neighbors[j];
+            if (neighbors != NULL && args->round < num_neighbors) {
+                const int32_t v = neighbors[args->round];
                 link_vertices(u, v, args->parents);
             }
         }
@@ -654,7 +670,70 @@ static void *final_phase_thread(void *arg) {
     return NULL;
 }
 
-CCResult *afforest_simple_pthreads(const Graph *restrict g, int32_t num_threads, int32_t neighbor_rounds) {
+/**
+ * Thread function for final phase (supports static and dynamic scheduling)
+ */
+static void *final_phase_thread(void *arg) {
+    final_phase_args_t *args = (final_phase_args_t *)arg;
+
+    /* Pin thread to core for NUMA locality */
+    pin_thread_to_core(args->thread_id);
+
+    if (args->use_dynamic) {
+        /* === DYNAMIC SCHEDULING === */
+        const int32_t chunk_size = DYNAMIC_CHUNK_SIZE;
+        const int32_t num_chunks = (args->num_vertices + chunk_size - 1) / chunk_size;
+
+        while (1) {
+            /* Atomically grab next chunk */
+            const int32_t chunk_id = atomic_fetch_add(&args->work_counter->next_chunk, 1);
+
+            if (chunk_id >= num_chunks) break;  /* No more work */
+
+            /* Calculate chunk boundaries */
+            const int32_t start = chunk_id * chunk_size;
+            const int32_t end = (start + chunk_size > args->num_vertices)
+                                ? args->num_vertices
+                                : start + chunk_size;
+
+            /* Process this chunk */
+            for (int32_t u = start; u < end; u++) {
+                if (args->parents[u] == args->largest_component) continue;
+
+                int32_t num_neighbors = 0;
+                const int32_t *neighbors = graph_get_neighbors(args->g, u, &num_neighbors);
+
+                /* Process remaining neighbors (after neighbor_rounds) */
+                if (neighbors != NULL) {
+                    for (int32_t j = args->neighbor_rounds; j < num_neighbors; j++) {
+                        const int32_t v = neighbors[j];
+                        link_vertices(u, v, args->parents);
+                    }
+                }
+            }
+        }
+    } else {
+        /* === STATIC SCHEDULING === */
+        for (int32_t u = args->start_idx; u < args->end_idx; u++) {
+            if (args->parents[u] == args->largest_component) continue;
+
+            int32_t num_neighbors = 0;
+            const int32_t *neighbors = graph_get_neighbors(args->g, u, &num_neighbors);
+
+            /* Process remaining neighbors (after neighbor_rounds) */
+            if (neighbors != NULL) {
+                for (int32_t j = args->neighbor_rounds; j < num_neighbors; j++) {
+                    const int32_t v = neighbors[j];
+                    link_vertices(u, v, args->parents);
+                }
+            }
+        }
+    }
+
+    return NULL;
+}
+
+CCResult *afforest_simple_pthreads(const Graph *restrict g, int32_t num_threads, int32_t neighbor_rounds, bool use_dynamic) {
     /* Check arguments */
     if (g == NULL) {
         fprintf(stderr, "Error: NULL graph pointer\n");
@@ -707,6 +786,34 @@ CCResult *afforest_simple_pthreads(const Graph *restrict g, int32_t num_threads,
         return NULL;
     }
 
+    /* Allocate work counters for dynamic scheduling (one per phase) */
+    work_counter_t *neighbor_counters = NULL;
+    work_counter_t *final_counter = NULL;
+
+    if (use_dynamic) {
+        /* One work counter per neighbor round */
+        neighbor_counters = calloc((size_t)neighbor_rounds, sizeof(work_counter_t));
+        final_counter = calloc(1, sizeof(work_counter_t));
+
+        if (neighbor_counters == NULL || final_counter == NULL) {
+            fprintf(stderr, "Error: Failed to allocate work counters\n");
+            free(parents);
+            free(result);
+            free(threads);
+            free(init_args);
+            free(neighbor_args);
+            free(compress_args);
+            free(final_args);
+            free(neighbor_counters);
+            free(final_counter);
+            return NULL;
+        }
+    }
+
+    printf("Using %s scheduling (chunk size: %d)\n",
+           use_dynamic ? "DYNAMIC" : "STATIC",
+           use_dynamic ? DYNAMIC_CHUNK_SIZE : 0);
+
 
     for (int i = 0; i < num_threads; i++) {
         const int32_t verts_per_thread = num_vertices / num_threads;
@@ -728,8 +835,12 @@ CCResult *afforest_simple_pthreads(const Graph *restrict g, int32_t num_threads,
 
     /* === PHASE 2: Neighbor sampling rounds (with compression) === */
     for (int32_t r = 0; r < neighbor_rounds; ++r) {
-        /* Neighbor sampling */
+        /* Reset work counter for this round (if using dynamic scheduling) */
+        if (use_dynamic) {
+            atomic_store(&neighbor_counters[r].next_chunk, 0);
+        }
 
+        /* Neighbor sampling */
         for (int i = 0; i < num_threads; i++) {
             neighbor_args[i].thread_id = i;
             neighbor_args[i].num_threads = num_threads;
@@ -737,6 +848,8 @@ CCResult *afforest_simple_pthreads(const Graph *restrict g, int32_t num_threads,
             neighbor_args[i].parents = parents;
             neighbor_args[i].num_vertices = num_vertices;
             neighbor_args[i].round = r;
+            neighbor_args[i].use_dynamic = use_dynamic;
+            neighbor_args[i].work_counter = use_dynamic ? &neighbor_counters[r] : NULL;
 
             pthread_create(&threads[i], NULL, neighbor_round_thread, &neighbor_args[i]);
         }
@@ -744,7 +857,6 @@ CCResult *afforest_simple_pthreads(const Graph *restrict g, int32_t num_threads,
         for (int i = 0; i < num_threads; i++) {
             pthread_join(threads[i], NULL);
         }
-
 
         /* Compression - REUSE threads array */
         compress_with_threads(parents, num_vertices, threads, compress_args, num_threads);
@@ -755,7 +867,11 @@ CCResult *afforest_simple_pthreads(const Graph *restrict g, int32_t num_threads,
 
     /* === PHASE 4: Final linking phase === */
 
-    /* Approximate dynamic scheduling by giving each thread a range */
+    /* Reset work counter for final phase (if using dynamic scheduling) */
+    if (use_dynamic) {
+        atomic_store(&final_counter->next_chunk, 0);
+    }
+
     for (int i = 0; i < num_threads; i++) {
         const int32_t verts_per_thread = num_vertices / num_threads;
         const int32_t start = i * verts_per_thread;
@@ -770,6 +886,8 @@ CCResult *afforest_simple_pthreads(const Graph *restrict g, int32_t num_threads,
         final_args[i].largest_component = largest_component;
         final_args[i].start_idx = start;
         final_args[i].end_idx = end;
+        final_args[i].use_dynamic = use_dynamic;
+        final_args[i].work_counter = use_dynamic ? final_counter : NULL;
 
         pthread_create(&threads[i], NULL, final_phase_thread, &final_args[i]);
     }
@@ -798,6 +916,8 @@ CCResult *afforest_simple_pthreads(const Graph *restrict g, int32_t num_threads,
         free(neighbor_args);
         free(compress_args);
         free(final_args);
+        free(neighbor_counters);
+        free(final_counter);
         return NULL;
     }
 
@@ -807,6 +927,8 @@ CCResult *afforest_simple_pthreads(const Graph *restrict g, int32_t num_threads,
     free(neighbor_args);
     free(compress_args);
     free(final_args);
+    free(neighbor_counters);
+    free(final_counter);
 
     return result;
 }
