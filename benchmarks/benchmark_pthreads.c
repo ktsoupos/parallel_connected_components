@@ -6,6 +6,10 @@
 #include <stdbool.h>
 #include <time.h>
 
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 199309L  /* For clock_gettime */
+#endif
+
 int run_pthreads_benchmarks(const Graph* g, int num_threads) {
     if (g == NULL) {
         fprintf(stderr, "Error: NULL graph pointer\n");
@@ -22,7 +26,7 @@ int run_pthreads_benchmarks(const Graph* g, int num_threads) {
     /* Run sequential baseline for comparison */
     printf("\n=== Sequential Baseline (Union-Find Edge Reorder) ===\n");
     clock_t start_seq = clock();
-    CCResult* result_seq = label_propagation_min(g);
+    CCResult* result_seq = union_find_cc_edge_reorder(g);
     clock_t end_seq = clock();
 
     if (result_seq == NULL) {
@@ -36,9 +40,10 @@ int run_pthreads_benchmarks(const Graph* g, int num_threads) {
 
     /* Run Afforest Simple with pthreads */
     printf("\n=== Parallel Afforest (Pthreads) ===\n");
-    clock_t start_afforest_simple = clock();
+    struct timespec start_afforest_simple, end_afforest_simple;
+    clock_gettime(CLOCK_MONOTONIC, &start_afforest_simple);
     CCResult* result_afforest_simple = afforest_simple_pthreads(g, num_threads, 2);
-    clock_t end_afforest_simple = clock();
+    clock_gettime(CLOCK_MONOTONIC, &end_afforest_simple);
 
     if (result_afforest_simple == NULL) {
         fprintf(stderr, "Error: Afforest failed\n");
@@ -46,7 +51,8 @@ int run_pthreads_benchmarks(const Graph* g, int num_threads) {
         return -1;
     }
 
-    const double elapsed_afforest_simple = (double)(end_afforest_simple - start_afforest_simple) / CLOCKS_PER_SEC;
+    const double elapsed_afforest_simple = (end_afforest_simple.tv_sec - start_afforest_simple.tv_sec) +
+                                           (end_afforest_simple.tv_nsec - start_afforest_simple.tv_nsec) / 1e9;
     printf("Parallel Afforest completed in %.5f seconds\n", elapsed_afforest_simple);
     cc_result_print_stats(result_afforest_simple, g);
 
