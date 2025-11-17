@@ -36,13 +36,15 @@ ThreadPool *threadpool_create(int32_t num_workers, int64_t deque_capacity) {
     // 6. Initialize atomics
     atomic_init(&pool->active_tasks, 0);
     atomic_init(&pool->shutdown, false);
-    atomic_init(&pool->barrier_waiting, true);  // Start in barrier mode
+    atomic_init(&pool->barrier_waiting, true); // Start in barrier mode
 
     // 7. Initialize barriers
     pthread_barrier_init(&pool->start_barrier, NULL, (uint32_t)num_workers);
     pthread_barrier_init(&pool->iter_barrier, NULL, (uint32_t)(num_workers + 1)); // +1 for main
     pthread_mutex_init(&pool->tasks_done_mutex, NULL);
     pthread_cond_init(&pool->tasks_done_cond, NULL);
+    pthread_mutex_init(&pool->work_mutex, NULL);
+    pthread_cond_init(&pool->work_available, NULL);
 
     return pool;
 }
@@ -68,22 +70,11 @@ void threadpool_wait(ThreadPool *pool) {
     if (!pool)
         return;
 
+    pthread_mutex_lock(&pool->tasks_done_mutex);
     while (atomic_load(&pool->active_tasks) > 0) {
-        pthread_mutex_lock(&pool->tasks_done_mutex);
-
-        if (atomic_load(&pool->active_tasks) > 0) {
-            pthread_cond_wait(&pool->tasks_done_cond,
-                              &pool->tasks_done_mutex);
-        }
-
-        pthread_mutex_unlock(&pool->tasks_done_mutex);
+        pthread_cond_wait(&pool->tasks_done_cond, &pool->tasks_done_mutex);
     }
-
-    atomic_store(&pool->shutdown, 1);
-
-    for (int i = 0; i < pool->num_workers; i++) {
-        pthread_join(pool->threads[i], NULL);
-    }
+    pthread_mutex_unlock(&pool->tasks_done_mutex);
 }
 
 void threadpool_barrier(ThreadPool *pool) {
@@ -104,25 +95,22 @@ void threadpool_barrier(ThreadPool *pool) {
 }
 
 void threadpool_wake_workers(ThreadPool *pool) {
-    // No-op with pthread_barrier - workers wake when barrier releases
-    (void)pool;
-}
-
-void threadpool_shutdown(ThreadPool *pool) {
-    if (pool == NULL) {
+    if (!pool)
         return;
-    }
 
-    // Signal all workers to stop
-    atomic_store(&pool->shutdown, 1);
-    atomic_store(&pool->barrier_waiting, 0); // Exit barrier mode
-
-    // Wake any waiting on tasks_done
     pthread_mutex_lock(&pool->tasks_done_mutex);
     pthread_cond_broadcast(&pool->tasks_done_cond);
     pthread_mutex_unlock(&pool->tasks_done_mutex);
+}
 
-    // Join all threads
+
+void threadpool_shutdown(ThreadPool *pool) {
+    if (!pool)
+        return;
+
+    atomic_store(&pool->shutdown, 1);
+    threadpool_wake_workers(pool);
+
     for (int i = 0; i < pool->num_workers; i++) {
         pthread_join(pool->threads[i], NULL);
     }
@@ -143,6 +131,8 @@ void threadpool_destroy(ThreadPool *pool) {
     pthread_barrier_destroy(&pool->iter_barrier);
     pthread_mutex_destroy(&pool->tasks_done_mutex);
     pthread_cond_destroy(&pool->tasks_done_cond);
+    pthread_mutex_destroy(&pool->work_mutex);
+    pthread_cond_destroy(&pool->work_available);
 
     // Free arrays
     free(pool->workers);

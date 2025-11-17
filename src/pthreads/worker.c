@@ -116,96 +116,61 @@ void *worker_thread_func(void *arg) {
     return NULL;
 }
 
-void worker_main_loop(Worker *worker, ThreadPool *pool) {
-    if (worker == NULL || pool == NULL) {
-        return;
-    }
-
-    // Set thread-local storage so tasks can access worker/pool
+void worker_main_loop(struct Worker *worker, struct ThreadPool *pool) {
     current_worker = worker;
     current_pool = pool;
 
-    int idle_count = 0; // Track how long we've been idle
+    int idle_count = 0;
 
     while (!atomic_load_explicit(&pool->shutdown, memory_order_acquire)) {
         Task *task = deque_pop_bottom(&worker->deque);
-        if (task == NULL) {
+
+        if (!task) {
+            // Try stealing
             for (int attempt = 0; attempt < NUM_STEAL_MAX_ATTEMPTS; attempt++) {
                 int32_t victim_id = worker_select_victim(worker, pool->num_workers);
-                if (victim_id < 0) {
-                    break; // invalid victim
-                }
+                if (victim_id < 0) break;
                 Worker *victim = &pool->workers[victim_id];
                 task = deque_steal_top(&victim->deque);
-                if (task != NULL) {
-                    break; // steal successful
-                }
+                if (task) break;
             }
         }
-        if (task != NULL) {
-            if (task->func != NULL) {
-                task->func(task); // execute task
-            }
-            if (task->should_free) {
-                free(task);
-            }
-            // If that was the last task, signal waiters
-            const int64_t remaining = atomic_fetch_sub_explicit(&pool->active_tasks,
-                                                                1, memory_order_release) - 1;
+
+        if (task) {
+            if (task->func) task->func(task);
+
+            // Update active_tasks and notify main thread
+            int64_t remaining = atomic_fetch_sub_explicit(&pool->active_tasks, 1, memory_order_release) - 1;
             if (remaining == 0) {
                 pthread_mutex_lock(&pool->tasks_done_mutex);
                 pthread_cond_broadcast(&pool->tasks_done_cond);
                 pthread_mutex_unlock(&pool->tasks_done_mutex);
             }
 
-            idle_count = 0; // Track how long we've been idle
-
+            idle_count = 0;
         } else {
             idle_count++;
 
-            // Check if there are no tasks in the system
-            if (atomic_load_explicit(&pool->active_tasks, memory_order_acquire) == 0) {
-                // Check if we should wait or exit
-                if (atomic_load_explicit(&pool->barrier_waiting, memory_order_acquire)) {
-                    // Barrier mode - synchronize with main thread at barrier
-                    pthread_barrier_wait(&pool->iter_barrier);
-                    idle_count = 0; // Reset idle count
-                } else {
-                    // Non-barrier mode - backoff and potentially exit
-                    worker_backoff(1);
-                    if (atomic_load_explicit(&pool->active_tasks, memory_order_acquire) == 0) {
-                        break; // No work in system, exit
-                    }
-                }
-            } else {
-                // Still tasks in system, just backoff a bit
-                worker_backoff(idle_count);
+            // Wait for new tasks or shutdown
+            pthread_mutex_lock(&pool->tasks_done_mutex);
+            if (atomic_load(&pool->active_tasks) > 0) {
+                pthread_cond_wait(&pool->tasks_done_cond, &pool->tasks_done_mutex);
             }
+            pthread_mutex_unlock(&pool->tasks_done_mutex);
+
+            worker_backoff(idle_count);
         }
     }
 }
 
 void worker_backoff(int idle_count) {
-    if (idle_count <= 0) {
-        return;
-    }
-
     if (idle_count < 10) {
-        // Phase 1: Yield CPU to other threads (low overhead)
         sched_yield();
     } else if (idle_count < 100) {
-        // Phase 2: Short sleep (1 microsecond)
-        struct timespec ts = {
-            .tv_sec = 0,
-            .tv_nsec = 1000 // 1 μs
-        };
+        struct timespec ts = {0, 1000}; // 1 μs
         nanosleep(&ts, NULL);
     } else {
-        // Phase 3: Longer sleep (100 microseconds)
-        const struct timespec ts = {
-            .tv_sec = 0,
-            .tv_nsec = 100000 // 100 μs
-        };
+        struct timespec ts = {0, 100000}; // 100 μs
         nanosleep(&ts, NULL);
     }
 }
