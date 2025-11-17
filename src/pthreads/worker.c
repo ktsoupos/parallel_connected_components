@@ -146,10 +146,12 @@ void worker_main_loop(Worker *worker, ThreadPool *pool) {
             if (task->func != NULL) {
                 task->func(task); // execute task
             }
-            free(task);
+            if (task->should_free) {
+                free(task);
+            }
             // If that was the last task, signal waiters
             const int64_t remaining = atomic_fetch_sub_explicit(&pool->active_tasks,
-                                                          1, memory_order_release) - 1;
+                                                                1, memory_order_release) - 1;
             if (remaining == 0) {
                 pthread_mutex_lock(&pool->tasks_done_mutex);
                 pthread_cond_broadcast(&pool->tasks_done_cond);
@@ -176,7 +178,7 @@ void worker_main_loop(Worker *worker, ThreadPool *pool) {
                     }
 
                     pthread_mutex_unlock(&pool->idle_mutex);
-                    idle_count = 0;  // Reset idle count after waking
+                    idle_count = 0; // Reset idle count after waking
                 } else {
                     // Non-barrier mode - backoff and potentially exit
                     worker_backoff(1);
@@ -217,10 +219,10 @@ void worker_backoff(int idle_count) {
     }
 }
 
-Worker* worker_current(void) {
+Worker *worker_current(void) {
     return current_worker;
 }
 
-ThreadPool* worker_current_pool(void) {
+ThreadPool *worker_current_pool(void) {
     return current_pool;
 }

@@ -7,10 +7,11 @@ typedef struct ThreadPool ThreadPool; // Forward declaration
 
 typedef struct Task {
     void (*func)(struct Task *t); // function to execute this task
-    int64_t start_vertex;         // first vertex in this chunk
-    int64_t end_vertex;           // one past the last vertex
+    int32_t start_vertex;         // first vertex in this chunk
+    int32_t end_vertex;           // one past the last vertex
     void *context;                // generic context pointer for task-specific data
-    char pad[32];                 // padding: 64 - (8+8+8+8) = 32 bytes
+    bool should_free;             // whether worker should free this task after execution
+    char pad[31];                 // padding: 64 - (8+8+8+8+1) = 31 bytes
 } Task __attribute__((aligned(64)));
 
 
