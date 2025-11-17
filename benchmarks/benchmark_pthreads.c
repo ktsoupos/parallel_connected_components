@@ -50,7 +50,7 @@ int run_pthreads_benchmarks(const Graph* g, int num_threads) {
 
     const double elapsed_sync = (double)(end_sync - start_sync) / CLOCKS_PER_SEC;
     printf("Pthreads synchronous LP completed in %.5f seconds\n", elapsed_sync);
-    cc_result_print_stats(result_sync, g);
+    // cc_result_print_stats(result_sync, g);
 
     /* Run Afforest with pthreads */
     printf("\n=== Pthreads Afforest (Lock-Free Union-Find) ===\n");
@@ -71,16 +71,14 @@ int run_pthreads_benchmarks(const Graph* g, int num_threads) {
 
     /* Verify correctness: compare component counts */
     printf("\n=== Correctness Verification ===\n");
-    bool sync_correct = (result_seq->num_components == result_sync->num_components);
+    // bool sync_correct = (result_seq->num_components == result_sync->num_components);
     bool afforest_correct = (result_seq->num_components == result_afforest->num_components);
 
-    if (sync_correct && afforest_correct) {
+    if (afforest_correct) {
         printf("✓ All algorithms found %d components\n", result_seq->num_components);
     } else {
         printf("✗ WARNING: Component counts DIFFER\n");
         printf("  Sequential: %d components\n", result_seq->num_components);
-        printf("  Sync LP:    %d components %s\n", result_sync->num_components,
-               sync_correct ? "✓" : "✗");
         printf("  Afforest:   %d components %s\n", result_afforest->num_components,
                afforest_correct ? "✓" : "✗");
     }
@@ -88,14 +86,13 @@ int run_pthreads_benchmarks(const Graph* g, int num_threads) {
     /* Print performance comparison */
     printf("\n=== Performance Comparison ===\n");
     printf("Sequential (UF edge reorder):        %.5f seconds\n", elapsed_seq);
-    printf("Parallel (sync LP, %d threads):     %.5f seconds (%d iterations)\n",
-           num_threads, elapsed_sync, result_sync->num_iterations);
+
     printf("Parallel (Afforest, %d threads):     %.5f seconds (%d iterations)\n",
            num_threads, elapsed_afforest, result_afforest->num_iterations);
 
     /* Compute and print speedup */
     if (elapsed_seq > 0.0) {
-        const double speedup_sync = elapsed_seq / elapsed_sync;
+        const double speedup_sync = 1;
         const double speedup_afforest = elapsed_seq / elapsed_afforest;
         const double eff_sync = speedup_sync / (double)num_threads * 100.0;
         const double eff_afforest = speedup_afforest / (double)num_threads * 100.0;

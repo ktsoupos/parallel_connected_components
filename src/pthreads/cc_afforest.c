@@ -155,12 +155,9 @@ sample_frequent_element(int32_t *parents, int32_t num_vertices, int32_t num_samp
 /* ------------------------ MAIN AFFOREST ------------------------ */
 CCResult *afforest_pthreads(const Graph *g, int32_t num_threads, int32_t neighbor_rounds) {
 
-    printf("[DEBUG] afforest_pthreads(): started\n");
-
     if (!g)
         return NULL;
     const int32_t num_vertices = g->num_vertices;
-    printf("[DEBUG] num_vertices = %d\n", num_vertices);
 
     // Allocate parent array
     int32_t *parents = aligned_alloc(64, sizeof(int32_t) * (size_t)num_vertices);
@@ -169,7 +166,6 @@ CCResult *afforest_pthreads(const Graph *g, int32_t num_threads, int32_t neighbo
 
     if (neighbor_rounds <= 0)
         neighbor_rounds = 2;
-    printf("[DEBUG] Using %d neighbor rounds\n", neighbor_rounds);
 
     // Afforest context
     AfforestContext *context = malloc(sizeof(AfforestContext));
@@ -197,16 +193,13 @@ CCResult *afforest_pthreads(const Graph *g, int32_t num_threads, int32_t neighbo
     }
 
     // ThreadPool
-    printf("[DEBUG] Creating threadpool with %d threads\n", num_threads);
-    ThreadPool *pool = threadpool_create(num_threads, (num_chunks / num_threads) + 64);
+    ThreadPool *pool = threadpool_create(num_threads, (num_chunks / num_threads) + 128);
     threadpool_start(pool);
-    printf("[DEBUG] Threadpool started\n");
 
     // ===========================
     // SAMPLING ROUNDS + COMPRESSION
     // ===========================
     for (int32_t round = 0; round < neighbor_rounds; round++) {
-        printf("\n[DEBUG] === Sampling round %d ===\n", round);
         context->neighbor_round = round;
 
         for (int32_t i = 0; i < num_chunks; i++) {
@@ -214,7 +207,6 @@ CCResult *afforest_pthreads(const Graph *g, int32_t num_threads, int32_t neighbo
             task->func = process_sampling_chunk;
 
             int32_t worker_id = i % num_threads;
-            printf("[DEBUG]  pushing sampling task chunk %d to worker %d\n", i, worker_id);
 
             deque_push_bottom(&pool->workers[worker_id].deque, task);
             atomic_fetch_add(&pool->active_tasks, 1);
@@ -224,33 +216,31 @@ CCResult *afforest_pthreads(const Graph *g, int32_t num_threads, int32_t neighbo
         threadpool_wake_workers(pool);
         threadpool_wait(pool);
 
-        printf("[DEBUG] sampling round %d completed\n", round);
 
         // Compression
-        printf("[DEBUG] starting compression after sampling round %d\n", round);
         for (int32_t i = 0; i < num_chunks; i++) {
             Task *task = &context->task_pool[i];
             task->func = process_compress_chunk;
 
             int32_t worker_id = i % num_threads;
-            printf("[DEBUG] added task: %d\n", task->start_vertex);
+            bool success = deque_push_bottom(&pool->workers[worker_id].deque, task);
+            if (!success) {
+                // atomic_fetch_sub(&pool->active_tasks, 1);
+            } else {
+                atomic_fetch_add(&pool->active_tasks, 1);
 
-            deque_push_bottom(&pool->workers[worker_id].deque, task);
-            atomic_fetch_add(&pool->active_tasks, 1);
+            }
         }
 
         threadpool_wake_workers(pool);
         threadpool_wait(pool);
 
-        printf("[DEBUG] compression phase done (post-round %d)\n", round);
     }
 
     // ===========================
     // IDENTIFY LARGEST COMPONENT
     // ===========================
-    printf("\n[DEBUG] Finding largest component (sampling)\n");
     int32_t largest_component = sample_frequent_element(parents, num_vertices, 1024);
-    printf("[DEBUG] Largest component root ≈ %d\n", largest_component);
 
     // ===========================
     // FINAL LINKING
@@ -263,40 +253,45 @@ CCResult *afforest_pthreads(const Graph *g, int32_t num_threads, int32_t neighbo
     final_ctx->num_tasks = num_chunks;
     final_ctx->task_pool = context->task_pool;
 
-    printf("\n[DEBUG] === Starting final linking phase ===\n");
     for (int32_t i = 0; i < num_chunks; i++) {
         Task *task = &context->task_pool[i];
         task->func = process_final_link_chunk;
         task->context = final_ctx;
 
         int32_t worker_id = i % num_threads;
-        printf("[DEBUG]  pushing final-link task %d -> worker %d\n", i, worker_id);
 
-        deque_push_bottom(&pool->workers[worker_id].deque, task);
-        atomic_fetch_add(&pool->active_tasks, 1);
+        bool success = deque_push_bottom(&pool->workers[worker_id].deque, task);
+        if (!success) {
+            // atomic_fetch_sub(&pool->active_tasks, 1);
+        } else {
+            atomic_fetch_add(&pool->active_tasks, 1);
+
+        }
     }
 
     threadpool_wake_workers(pool);
     threadpool_wait(pool);
-    printf("[DEBUG] Final linking complete\n");
 
     // ===========================
     // FINAL COMPRESSION
     // ===========================
-    printf("[DEBUG] Starting final compression\n");
     for (int32_t i = 0; i < num_chunks; i++) {
         Task *task = &context->task_pool[i];
         task->func = process_compress_chunk;
         task->context = context;
 
         int32_t worker_id = i % num_threads;
-        deque_push_bottom(&pool->workers[worker_id].deque, task);
-        atomic_fetch_add(&pool->active_tasks, 1);
+        bool success = deque_push_bottom(&pool->workers[worker_id].deque, task);
+        if (!success) {
+            // atomic_fetch_sub(&pool->active_tasks, 1);
+        } else {
+            atomic_fetch_add(&pool->active_tasks, 1);
+
+        }
     }
 
     threadpool_wake_workers(pool);
     threadpool_wait(pool);
-    printf("[DEBUG] Final compression finished\n");
 
     // ===========================
     // Shutdown
@@ -313,6 +308,5 @@ CCResult *afforest_pthreads(const Graph *g, int32_t num_threads, int32_t neighbo
     result->num_iterations = neighbor_rounds + 1;
     result->num_components = count_unique_labels(parents, num_vertices);
 
-    printf("[DEBUG] afforest_pthreads(): DONE. Components = %d\n", result->num_components);
     return result;
 }

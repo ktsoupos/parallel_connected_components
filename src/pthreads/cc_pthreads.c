@@ -153,7 +153,7 @@ CCResult *label_propagation_sync_pthreads(const Graph *g, int32_t num_threads) {
             atomic_fetch_add_explicit(&pool->active_tasks, 1, memory_order_release);
         }
         threadpool_wake_workers(pool);
-        threadpool_barrier(pool);
+        threadpool_wait(pool);
 
         num_iterations++;
 
