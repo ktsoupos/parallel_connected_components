@@ -4,6 +4,7 @@
 #include "definitions.h"
 #include "deque.h"
 #include "threadpool.h"
+#include "worker.h"
 
 #include <stdatomic.h>
 #include <stdio.h>
@@ -189,24 +190,91 @@ CCResult *label_propagation_sync_pthreads(const Graph *g, int32_t num_threads) {
 
 /* ============ ASYNC LABEL PROPAGATION WITH WORK-STEALING ============ */
 
+/* Subdivision threshold: if a chunk has more vertices than this, subdivide it */
+#define SUBDIVISION_THRESHOLD 8192  /* Increased to reduce subdivision on large graphs */
+
+/* Maximum subdivisions per worker */
+#define MAX_SUBDIVISIONS_PER_WORKER 2048  /* Reduced to catch issues earlier */
+
 typedef struct AsyncLPContext {
     const Graph *g;
     _Atomic(int32_t) *labels;
     _Atomic(int8_t) *changed;
     int32_t num_vertices;
+    ThreadPool *pool;
+
+    /* Per-worker subdivision task pools (eliminates malloc) */
+    Task *subdivision_pool;
+    _Atomic(int32_t) *worker_alloc_counters;
+    int32_t num_workers;
 } AsyncLPContext;
 
+/* Forward declaration */
+static void process_chunk_once(Task *task);
+
 /**
- * Process a vertex chunk with work-stealing (simplified - no dynamic task creation)
+ * Process a vertex chunk ONCE with work-stealing and dynamic subdivision
+ * Used for subdivided tasks (one-time processing)
  */
-static void process_chunk_async(Task *task) {
+static void process_chunk_once(Task *task) {
     if (task == NULL)
         return;
 
     AsyncLPContext *ctx = (AsyncLPContext *)task->context;
+    int32_t range = task->end_vertex - task->start_vertex;
+
+    /* If chunk is large enough, subdivide it for better load balancing */
+    if (range > SUBDIVISION_THRESHOLD) {
+        int32_t mid = task->start_vertex + (range / 2);
+
+        /* Get current worker */
+        Worker *self = worker_current();
+        if (self == NULL) {
+            goto process_sequentially;
+        }
+
+        /* Allocate from per-worker pool (NO MALLOC!) */
+        int32_t worker_id = self->id;
+        int32_t alloc_idx = atomic_fetch_add_explicit(
+            &ctx->worker_alloc_counters[worker_id], 1, memory_order_relaxed);
+
+        if (alloc_idx >= MAX_SUBDIVISIONS_PER_WORKER) {
+            /* Pool exhausted - fallback to sequential */
+            atomic_fetch_sub_explicit(&ctx->worker_alloc_counters[worker_id], 1, memory_order_relaxed);
+            goto process_sequentially;
+        }
+
+        /* Get task from pool */
+        int32_t pool_idx = worker_id * MAX_SUBDIVISIONS_PER_WORKER + alloc_idx;
+        Task *left = &ctx->subdivision_pool[pool_idx];
+
+        /* Initialize left sub-task */
+        left->func = process_chunk_once;
+        left->start_vertex = task->start_vertex;
+        left->end_vertex = mid;
+        left->context = ctx;
+        left->should_free = false;  /* Don't free - it's from the pool! */
+
+        /* Increment active tasks before making task visible */
+        atomic_fetch_add_explicit(&ctx->pool->active_tasks, 1, memory_order_acq_rel);
+
+        if (!deque_push_bottom(&self->deque, left)) {
+            /* Deque full - rollback and fallback */
+            atomic_fetch_sub_explicit(&ctx->pool->active_tasks, 1, memory_order_acq_rel);
+            atomic_fetch_sub_explicit(&ctx->worker_alloc_counters[worker_id], 1, memory_order_relaxed);
+            goto process_sequentially;
+        }
+
+        /* Process right half directly (tail recursion optimization) */
+        task->start_vertex = mid;
+        /* Fall through to process right half */
+        range = task->end_vertex - task->start_vertex;
+    }
+
+process_sequentially:
+    /* Process range of vertices sequentially */
     bool local_changed = false;
 
-    /* Process range of vertices */
     for (int32_t v = task->start_vertex; v < task->end_vertex; v++) {
         int32_t current_label = atomic_load_explicit(&ctx->labels[v], memory_order_relaxed);
         int32_t min_label = current_label;
@@ -235,6 +303,8 @@ static void process_chunk_async(Task *task) {
         atomic_store_explicit(ctx->changed, 1, memory_order_release);
     }
 }
+
+/* Just use process_chunk_once - keep it simple! */
 
 /**
  * Async label propagation with work-stealing (simplified to avoid segfaults)
@@ -292,18 +362,25 @@ CCResult *label_propagation_async_pthreads(const Graph *g, int32_t num_threads) 
         return NULL;
     }
 
-    ctx->g = g;
-    ctx->labels = labels;
-    ctx->changed = &changed;
-    ctx->num_vertices = num_vertices;
+    /* Allocate subdivision task pools (per-worker, eliminates malloc) */
+    const size_t subdivision_pool_size = (size_t)num_threads * MAX_SUBDIVISIONS_PER_WORKER;
+    Task *subdivision_pool = calloc(subdivision_pool_size, sizeof(Task));
+    _Atomic(int32_t) *worker_counters = calloc((size_t)num_threads, sizeof(_Atomic(int32_t)));
 
-    /* Initialize task pool */
-    for (int32_t i = 0; i < num_chunks; i++) {
-        task_pool[i].func = process_chunk_async;
-        task_pool[i].start_vertex = i * chunk_size;
-        task_pool[i].end_vertex = (i == num_chunks - 1) ? num_vertices : (i + 1) * chunk_size;
-        task_pool[i].context = ctx;
-        task_pool[i].should_free = false;
+    if (subdivision_pool == NULL || worker_counters == NULL) {
+        fprintf(stderr, "Error: Failed to allocate subdivision pools\n");
+        free(labels);
+        free(ctx);
+        free(task_pool);
+        free(subdivision_pool);
+        free(worker_counters);
+        /* iteration_counter not allocated yet */
+        return NULL;
+    }
+
+    /* Initialize worker allocation counters */
+    for (int32_t i = 0; i < num_threads; i++) {
+        atomic_init(&worker_counters[i], 0);
     }
 
     /* Create threadpool */
@@ -314,55 +391,101 @@ CCResult *label_propagation_async_pthreads(const Graph *g, int32_t num_threads) 
         free(labels);
         free(ctx);
         free(task_pool);
+        free(subdivision_pool);
+        free(worker_counters);
         return NULL;
     }
 
-    threadpool_start(pool);
+    /* Setup context */
+    ctx->g = g;
+    ctx->labels = labels;
+    ctx->changed = &changed;
+    ctx->num_vertices = num_vertices;
+    ctx->pool = pool;
+    ctx->subdivision_pool = subdivision_pool;
+    ctx->worker_alloc_counters = worker_counters;
+    ctx->num_workers = num_threads;
 
-    /* Iterate until convergence */
-    int32_t num_iterations = 0;
-    const int32_t MAX_ITERATIONS = 100000;
+    /* Initialize task pool */
+    for (int32_t i = 0; i < num_chunks; i++) {
+        task_pool[i].func = process_chunk_once;
+        task_pool[i].start_vertex = i * chunk_size;
+        task_pool[i].end_vertex = (i == num_chunks - 1) ? num_vertices : (i + 1) * chunk_size;
+        task_pool[i].context = ctx;
+        task_pool[i].should_free = false;
+    }
 
-    while (num_iterations < MAX_ITERATIONS) {
-        atomic_store_explicit(&changed, 0, memory_order_relaxed);
+    /* Pre-populate worker deques with affinity-based distribution
+     * Each worker gets every Nth chunk (round-robin) BEFORE workers start */
+    for (int32_t worker_id = 0; worker_id < num_threads; worker_id++) {
+        Worker *worker = &pool->workers[worker_id];
 
-        /* Distribute tasks to workers for stealing */
-        /* Distribute tasks to workers for stealing */
-        for (int32_t i = 0; i < num_chunks; i++) {
-            const int32_t worker_id = i % num_threads;
-            Worker *worker = &pool->workers[worker_id];
-
-            // 1) increase outstanding count BEFORE making task visible:
+        /* Assign chunks in round-robin fashion to this worker */
+        for (int32_t chunk_id = worker_id; chunk_id < num_chunks; chunk_id += num_threads) {
+            /* Increment active tasks before pushing */
             atomic_fetch_add_explicit(&pool->active_tasks, 1, memory_order_acq_rel);
 
-            // 2) publish task to deque
-            bool pushed = deque_push_bottom(&worker->deque, &task_pool[i]);
-
-            if (!pushed) {
-                // fallback: if push failed, undo active_tasks and handle failure
+            if (!deque_push_bottom(&worker->deque, &task_pool[chunk_id])) {
+                /* This shouldn't happen with proper deque sizing, but handle it */
                 atomic_fetch_sub_explicit(&pool->active_tasks, 1, memory_order_acq_rel);
-                // handle error (e.g., push to another worker, expand deque, abort)
-                // For simplicity we print and continue
-                fprintf(stderr, "Warning: deque_push_bottom failed for chunk %d\n", i);
-                continue;
+                fprintf(stderr, "ERROR: Failed to pre-populate worker %d deque (chunk %d)\n",
+                        worker_id, chunk_id);
+                threadpool_destroy(pool);
+                free(labels);
+                free(subdivision_pool);
+                free(worker_counters);
+                free(ctx);
+                free(task_pool);
+                return NULL;
             }
-
-            // 3) wake workers (while not required to hold work_mutex, doing so
-            //    avoids races with waiters doing the check+wait under the same mutex)
-            pthread_mutex_lock(&pool->work_mutex);
-            pthread_cond_broadcast(&pool->work_available);
-            pthread_mutex_unlock(&pool->work_mutex);
-        }
-        num_iterations++;
-
-        threadpool_wait(pool);
-
-        num_iterations++;
-
-        if (atomic_load_explicit(&changed, memory_order_acquire) == 0) {
-            break;   // converged
         }
     }
+
+    /* Start workers */
+    threadpool_start(pool);
+
+    /* Simple iteration loop */
+    int32_t num_iterations = 0;
+    const int32_t MAX_ITERATIONS = 1000;
+
+    while (num_iterations < MAX_ITERATIONS) {
+        /* Reset changed flag before iteration */
+        atomic_store_explicit(&changed, 0, memory_order_relaxed);
+
+        /* Re-populate deques (after first iteration) */
+        if (num_iterations > 0) {
+            for (int32_t chunk_id = 0; chunk_id < num_chunks; chunk_id++) {
+                int32_t worker_id = chunk_id % num_threads;
+                Worker *worker = &pool->workers[worker_id];
+
+                atomic_fetch_add_explicit(&pool->active_tasks, 1, memory_order_acq_rel);
+
+                if (!deque_push_bottom(&worker->deque, &task_pool[chunk_id])) {
+                    atomic_fetch_sub_explicit(&pool->active_tasks, 1, memory_order_acq_rel);
+                    fprintf(stderr, "ERROR: Deque full (chunk %d, iteration %d)\n",
+                            chunk_id, num_iterations);
+                    goto cleanup_and_exit;
+                }
+            }
+        }
+
+        /* Wait for completion */
+        threadpool_wait(pool);
+
+        /* Reset subdivision pools for next iteration */
+        for (int32_t i = 0; i < num_threads; i++) {
+            atomic_store_explicit(&ctx->worker_alloc_counters[i], 0, memory_order_relaxed);
+        }
+
+        num_iterations++;
+
+        /* Check convergence */
+        if (atomic_load_explicit(&changed, memory_order_acquire) == 0) {
+            break;
+        }
+    }
+
+cleanup_and_exit:
 
     /* Shutdown */
     threadpool_shutdown(pool);
@@ -373,6 +496,8 @@ CCResult *label_propagation_async_pthreads(const Graph *g, int32_t num_threads) 
     if (final_labels == NULL) {
         fprintf(stderr, "Error: Failed to allocate final labels\n");
         free(labels);
+        free(subdivision_pool);
+        free(worker_counters);
         free(ctx);
         free(task_pool);
         return NULL;
@@ -384,6 +509,8 @@ CCResult *label_propagation_async_pthreads(const Graph *g, int32_t num_threads) 
 
     /* Cleanup */
     free(labels);
+    free(subdivision_pool);
+    free(worker_counters);
     free(ctx);
     free(task_pool);
 
