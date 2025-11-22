@@ -7,9 +7,37 @@ High-performance implementation of connected components algorithms for large und
 **Required:** gcc 11.4+, CMake 3.19.2+, PThreads
 **Optional:** OpenMP (for `cc_openmp`), OpenCilk (for `cc_opencilk`)
 
+## Quick Start (For Reviewers)
+
+```bash
+# Build everything
+make
+
+# Run correctness tests
+make test
+
+# Run performance benchmarks
+make benchmark
+
+# See all options
+make help
+```
+
+**Full build and test instructions:** See [SUBMISSION.md](SUBMISSION.md)
+
 ## Building
 
-### Standard Build (Sequential + OpenMP + PThreads)
+### Using Makefile (Recommended)
+
+```bash
+make              # Build sequential, OpenMP, and PThreads
+make opencilk     # Build OpenCilk (requires OpenCilk compiler)
+make clean        # Clean build artifacts
+```
+
+### Using CMake Directly
+
+#### Standard Build (Sequential + OpenMP + PThreads)
 
 ```bash
 # Release (recommended)
@@ -74,8 +102,10 @@ CILK_NWORKERS=16 ./cmake-build-opencilk/cc_opencilk data/com-Orkut.mtx
 - **Recursive Edge-Based**
 
 ### PThreads
-- **Label Propagation** (synchronous + asynchronous)
-- **Afforest** (standard + optimized variants)
+- **Label Propagation Sync** (barrier-based, static scheduling)
+- **Label Propagation Async** (work-stealing scheduler)
+- **Afforest Static** (fixed work distribution)
+- **Afforest Dynamic** (work-stealing with load balancing)
 
 ## Input Format
 
