@@ -10,15 +10,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <pthread.h>
+#include <time.h>
 
 /* Simplified label propagation using basic pthreads (no work-stealing) */
 typedef struct {
+    _Atomic(int8_t) *changed_flag;
     int thread_id;
     int num_threads;
-    const Graph *g;
     _Atomic(int32_t) *labels;
     int32_t num_vertices;
-    _Atomic(int8_t) *changed_flag;
+    const Graph *g;
 } lp_thread_args_t __attribute__((aligned(64)));
 
 /**
@@ -207,6 +208,8 @@ typedef struct AsyncLPContext {
     Task *subdivision_pool;
     _Atomic(int32_t) *worker_alloc_counters;
     int32_t num_workers;
+
+    bool disable_subdivision; /* Skip subdivision for huge graphs */
 } AsyncLPContext;
 
 /* Forward declaration */
@@ -223,8 +226,8 @@ static void process_chunk_once(Task *task) {
     AsyncLPContext *ctx = (AsyncLPContext *)task->context;
     int32_t range = task->end_vertex - task->start_vertex;
 
-    /* If chunk is large enough, subdivide it for better load balancing */
-    if (range > SUBDIVISION_THRESHOLD) {
+    /* If chunk is large enough, subdivide it (unless disabled for huge graphs) */
+    if (!ctx->disable_subdivision && range > SUBDIVISION_THRESHOLD) {
         int32_t mid = task->start_vertex + (range / 2);
 
         /* Get current worker */
@@ -234,13 +237,14 @@ static void process_chunk_once(Task *task) {
         }
 
         /* Allocate from per-worker pool (NO MALLOC!) */
-        int32_t worker_id = self->id;
+        const int32_t worker_id = self->id;
         int32_t alloc_idx = atomic_fetch_add_explicit(
             &ctx->worker_alloc_counters[worker_id], 1, memory_order_relaxed);
 
         if (alloc_idx >= MAX_SUBDIVISIONS_PER_WORKER) {
             /* Pool exhausted - fallback to sequential */
-            atomic_fetch_sub_explicit(&ctx->worker_alloc_counters[worker_id], 1, memory_order_relaxed);
+            atomic_fetch_sub_explicit(&ctx->worker_alloc_counters[worker_id], 1,
+                                      memory_order_relaxed);
             goto process_sequentially;
         }
 
@@ -253,7 +257,7 @@ static void process_chunk_once(Task *task) {
         left->start_vertex = task->start_vertex;
         left->end_vertex = mid;
         left->context = ctx;
-        left->should_free = false;  /* Don't free - it's from the pool! */
+        left->should_free = false; /* Don't free - it's from the pool! */
 
         /* Increment active tasks before making task visible */
         atomic_fetch_add_explicit(&ctx->pool->active_tasks, 1, memory_order_acq_rel);
@@ -261,7 +265,8 @@ static void process_chunk_once(Task *task) {
         if (!deque_push_bottom(&self->deque, left)) {
             /* Deque full - rollback and fallback */
             atomic_fetch_sub_explicit(&ctx->pool->active_tasks, 1, memory_order_acq_rel);
-            atomic_fetch_sub_explicit(&ctx->worker_alloc_counters[worker_id], 1, memory_order_relaxed);
+            atomic_fetch_sub_explicit(&ctx->worker_alloc_counters[worker_id], 1,
+                                      memory_order_relaxed);
             goto process_sequentially;
         }
 
@@ -335,18 +340,36 @@ CCResult *label_propagation_async_pthreads(const Graph *g, int32_t num_threads) 
     }
 
     /* Initialize labels */
+    fprintf(stderr, "Initializing %d labels...\n", num_vertices);
+    fflush(stderr);
     for (int32_t i = 0; i < num_vertices; i++) {
         atomic_init(&labels[i], i);
+        /* Progress for huge graphs */
+        if (num_vertices > 10000000 && i > 0 && i % 10000000 == 0) {
+            fprintf(stderr, "  %d / %d (%.1f%%)\n", i, num_vertices, 100.0 * i / num_vertices);
+            fflush(stderr);
+        }
     }
+    fprintf(stderr, "Labels initialized.\n");
+    fflush(stderr);
 
     /* Setup chunking for work-stealing */
     int32_t chunk_size = num_vertices / (num_threads * 4);
     if (chunk_size < 512)
         chunk_size = 512;
-    if (chunk_size > 8192)
-        chunk_size = 8192;
+    if (chunk_size > 16384) /* Larger chunks for huge graphs */
+        chunk_size = 16384;
 
     const int32_t num_chunks = (num_vertices + chunk_size - 1) / chunk_size;
+
+    /* For huge graphs, disable subdivision to reduce overhead */
+    const bool disable_subdivision = (num_vertices > 1000000);
+    if (disable_subdivision) {
+        fprintf(stderr, "Large graph detected (%d vertices) - disabling subdivision\n",
+                num_vertices);
+        fprintf(stderr, "Using %d chunks of size %d\n", num_chunks, chunk_size);
+        fflush(stderr);
+    }
 
     /* Allocate context and task pool */
     AsyncLPContext *ctx = malloc(sizeof(AsyncLPContext));
@@ -405,6 +428,7 @@ CCResult *label_propagation_async_pthreads(const Graph *g, int32_t num_threads) 
     ctx->subdivision_pool = subdivision_pool;
     ctx->worker_alloc_counters = worker_counters;
     ctx->num_workers = num_threads;
+    ctx->disable_subdivision = disable_subdivision;
 
     /* Initialize task pool */
     for (int32_t i = 0; i < num_chunks; i++) {
@@ -419,6 +443,7 @@ CCResult *label_propagation_async_pthreads(const Graph *g, int32_t num_threads) 
      * Each worker gets every Nth chunk (round-robin) BEFORE workers start */
     for (int32_t worker_id = 0; worker_id < num_threads; worker_id++) {
         Worker *worker = &pool->workers[worker_id];
+        int32_t worker_chunks = 0;
 
         /* Assign chunks in round-robin fashion to this worker */
         for (int32_t chunk_id = worker_id; chunk_id < num_chunks; chunk_id += num_threads) {
@@ -438,6 +463,7 @@ CCResult *label_propagation_async_pthreads(const Graph *g, int32_t num_threads) 
                 free(task_pool);
                 return NULL;
             }
+            worker_chunks++;
         }
     }
 

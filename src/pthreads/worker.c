@@ -120,7 +120,8 @@ static bool deque_is_all_empty(ThreadPool *pool) {
     for (int i = 0; i < pool->num_workers; i++) {
         int64_t top = atomic_load(&pool->workers[i].deque.top);
         int64_t bottom = atomic_load(&pool->workers[i].deque.bottom);
-        if (bottom > top) return false;
+        if (bottom > top)
+            return false;
     }
     return true;
 }
@@ -139,21 +140,26 @@ void worker_main_loop(struct Worker *worker, struct ThreadPool *pool) {
             // Try stealing
             for (int attempt = 0; attempt < NUM_STEAL_MAX_ATTEMPTS; attempt++) {
                 int32_t victim_id = worker_select_victim(worker, pool->num_workers);
-                if (victim_id < 0) break;
+                if (victim_id < 0)
+                    break;
                 Worker *victim = &pool->workers[victim_id];
                 task = deque_steal_top(&victim->deque);
-                if (task) break;
+                if (task)
+                    break;
             }
         }
 
         if (task) {
             // Do work
-            if (task->func) task->func(task);
+            static _Atomic(int64_t) task_counter = 0;
+
+            if (task->func)
+                task->func(task);
 
             // decrement active_tasks
             int64_t prev = atomic_fetch_sub_explicit(
                 &pool->active_tasks, 1, memory_order_acq_rel
-            );
+                );
 
             // signal main thread IF we reached 0
             if (prev == 1) {
@@ -167,11 +173,9 @@ void worker_main_loop(struct Worker *worker, struct ThreadPool *pool) {
         }
 
         pthread_mutex_lock(&pool->work_mutex);
-
         while (!atomic_load_explicit(&pool->shutdown, memory_order_acquire) &&
                atomic_load_explicit(&pool->active_tasks, memory_order_acquire) == 0 &&
-               deque_is_all_empty(pool))
-        {
+               deque_is_all_empty(pool)) {
             pthread_cond_wait(&pool->work_available, &pool->work_mutex);
         }
 
