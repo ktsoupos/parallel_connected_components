@@ -31,8 +31,9 @@ typedef struct Worker {
     ThreadPool *pool; // 8 bytes - pointer to parent thread pool
     int32_t id; // 4 bytes - worker ID
     int32_t victim; // 4 bytes - last selected victim
+    int32_t numa_node; // 4 bytes - NUMA node this worker is bound to
     _Atomic(int8_t) stop_flag; // 1 byte - stop signal
-    char pad[39]; // padding: 128 - (64+8+8+4+4+1) = 39 bytes
+    char pad[35]; // padding: 128 - (64+8+8+4+4+4+1) = 35 bytes
 } Worker __attribute__((aligned(64)));
 
 struct ThreadPool {
@@ -46,6 +47,8 @@ struct ThreadPool {
     pthread_mutex_t work_mutex; // for waking workers
     pthread_cond_t work_available; // signal new work
     int32_t num_workers; // 4 bytes - number of workers
+    int32_t num_numa_nodes; // 4 bytes - number of NUMA nodes
     _Atomic(int8_t) shutdown; // 1 byte - shutdown signal (0=running, 1=shutdown)
     _Atomic(int8_t) barrier_waiting; // 1 byte - workers should wait at barrier (not exit)
+    bool numa_available; // 1 byte - NUMA support available
 } __attribute__((aligned(64)));

@@ -42,15 +42,14 @@ cmake --build cmake-build-opencilk
 
 ```bash
 ./cc_sequential <graph.mtx> [report_interval]
-./cc_openmp <graph.mtx> [report_interval] [num_threads]
-./cc_pthreads <graph.mtx> [report_interval] [num_threads]
-./cc_opencilk <graph.mtx> [report_interval] [num_workers]
+./cc_openmp <graph.mtx> [report_interval] 
+./cc_pthreads <graph.mtx> [report_interval]
+./cc_opencilk <graph.mtx> [report_interval]
 ```
 
 **Arguments:**
 - `graph.mtx`: Matrix Market format graph file
 - `report_interval`: Progress reporting interval (0 = silent, default)
-- `num_threads/num_workers`: Thread/worker count (default: auto-detected)
 
 **Example:**
 ```bash

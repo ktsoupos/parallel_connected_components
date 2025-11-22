@@ -1,3 +1,7 @@
+#ifdef __linux__
+#define _GNU_SOURCE
+#endif
+
 #include "threadpool.h"
 
 #include "worker.h"
@@ -6,6 +10,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+
+#ifdef __linux__
+#include <sched.h>
+#include <unistd.h>
+#endif
 
 ThreadPool *threadpool_create(int32_t num_workers, int64_t deque_capacity) {
     if (num_workers <= 0 || deque_capacity <= 0) {
@@ -28,9 +37,24 @@ ThreadPool *threadpool_create(int32_t num_workers, int64_t deque_capacity) {
     }
     pool->num_workers = num_workers;
 
+    // Get number of CPU cores for affinity
+#ifdef __linux__
+    pool->num_numa_nodes = (int32_t)sysconf(_SC_NPROCESSORS_ONLN);
+    pool->numa_available = true;
+#ifdef DEBUG
+    fprintf(stderr, "[CPU Affinity] %d cores detected, will pin %d workers\n",
+            pool->num_numa_nodes, num_workers);
+#endif
+#else
+    pool->num_numa_nodes = 1;
+    pool->numa_available = false;
+#endif
+
     for (int i = 0; i < num_workers; i++) {
         worker_init(&pool->workers[i], i, deque_capacity);
         pool->workers[i].pool = pool; // Set backpointer
+        // Assign worker to CPU core (one worker per core, round-robin if more workers than cores)
+        pool->workers[i].numa_node = pool->numa_available ? (i % pool->num_numa_nodes) : 0;
     }
 
     // 6. Initialize atomics

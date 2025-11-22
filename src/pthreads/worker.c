@@ -1,3 +1,7 @@
+#ifdef __linux__
+#define _GNU_SOURCE
+#endif
+
 #include "worker.h"
 #include "deque.h"
 #include "utils.h"
@@ -9,6 +13,7 @@
 #include <stdlib.h>
 #include <time.h>
 #include <unistd.h>
+#include <pthread.h>
 
 
 #define NUM_STEAL_MAX_ATTEMPTS 3
@@ -36,6 +41,7 @@ void worker_init(Worker *worker, int32_t id, int64_t deque_capacity) {
     worker->id = id;
     worker->stop_flag = 0;
     worker->victim = -1;
+    worker->numa_node = 0; // Will be set by threadpool_create
 
     // Initialize RNG state (must be non-zero)
     // Mix worker ID with time to get unique seed per worker
@@ -52,6 +58,7 @@ void worker_init(Worker *worker, int32_t id, int64_t deque_capacity) {
     worker->deque.capacity = actual_capacity;
     worker->deque.mask = actual_capacity - 1;
 
+    // Allocate deque buffer (NUMA-aware allocation will be done after thread binding)
     worker->deque.buffer = (Task **)calloc((size_t)actual_capacity, sizeof(Task *));
     if (worker->deque.buffer == NULL) {
         fprintf(stderr, "Failed to allocate deque buffer for worker %d\n", id);
@@ -109,6 +116,23 @@ void *worker_thread_func(void *arg) {
     Worker *worker = (Worker *)arg;
     ThreadPool *pool = worker->pool;
 
+#ifdef __linux__
+    // Pin thread to specific CPU core for cache locality
+    if (pool->numa_available) {
+        cpu_set_t cpuset;
+        CPU_ZERO(&cpuset);
+        CPU_SET(worker->numa_node, &cpuset);
+
+        pthread_t current_thread = pthread_self();
+        if (pthread_setaffinity_np(current_thread, sizeof(cpu_set_t), &cpuset) != 0) {
+#ifdef DEBUG
+            fprintf(stderr, "[CPU Affinity] Warning: Failed to pin worker %d to core %d\n",
+                    worker->id, worker->numa_node);
+#endif
+        }
+    }
+#endif
+
     pthread_barrier_wait(&pool->start_barrier);
 
     worker_main_loop(worker, pool);
@@ -151,8 +175,6 @@ void worker_main_loop(struct Worker *worker, struct ThreadPool *pool) {
 
         if (task) {
             // Do work
-            static _Atomic(int64_t) task_counter = 0;
-
             if (task->func)
                 task->func(task);
 
