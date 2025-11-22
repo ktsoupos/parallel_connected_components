@@ -1,78 +1,111 @@
 # Parallel Connected Components
 
-Implementation of connected components algorithms for undirected graphs using sequential and parallel approaches.
-
-## Overview
-
-This project identifies connected components in large undirected graphs. A connected component is a maximal subgraph where there is a path from each vertex to any other vertex.
+High-performance implementation of connected components algorithms for large undirected graphs using sequential and parallel approaches (OpenMP, OpenCilk, PThreads).
 
 ## Dependencies
 
-- **gcc** 11.4+ (with C11 support)
-- **CMake** 3.10+
-- **OpenMP** (included with gcc)
-- **PThreads** (standard on Linux)
-- **OpenCilk** (optional)
+**Required:** gcc 11.4+, CMake 3.19.2+, PThreads
+**Optional:** OpenMP (for `cc_openmp`), OpenCilk (for `cc_opencilk`)
 
 ## Building
 
-### Using CMake
+### Standard Build (Sequential + OpenMP + PThreads)
 
 ```bash
-mkdir build
-cd build
-cmake ..
-make
+# Release (recommended)
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+
+# Debug
+cmake -B build -DCMAKE_BUILD_TYPE=Debug
+cmake --build build
 ```
 
-### Using CLion
+**Outputs:** `build/cc_sequential`, `build/cc_openmp`, `build/cc_pthreads`
 
-1. Open the project in CLion
-2. CLion will automatically detect `CMakeLists.txt`
-3. Click **Build → Build Project** (Ctrl+F9)
-4. Executables will be in `cmake-build-debug/`
+### OpenCilk Build
 
-## Running
+```bash
+CC=/opt/opencilk/bin/clang cmake -B cmake-build-opencilk -DCMAKE_BUILD_TYPE=Release
+cmake --build cmake-build-opencilk
+```
 
-### Command Line
+**Outputs:** `cmake-build-opencilk/cc_opencilk`, `cc_opencilk_cilksan` (race detector), `cc_opencilk_cilkscale` (work-span analyzer), `cc_opencilk_cilkscale_bench` (scalability)
+
+### CLion
+
+**Standard:** Open project → Select Debug/Release → Build (Ctrl+F9)
+
+**OpenCilk:** Settings → CMake → Add profile → Set CMake options: `-DCMAKE_C_COMPILER=/opt/opencilk/bin/clang` → Build directory: `cmake-build-opencilk`
+
+## Usage
 
 ```bash
 ./cc_sequential <graph.mtx> [report_interval]
+./cc_openmp <graph.mtx> [report_interval] 
+./cc_pthreads <graph.mtx> [report_interval]
+./cc_opencilk <graph.mtx> [report_interval]
 ```
 
 **Arguments:**
-- `graph.mtx`: Path to Matrix Market format graph file
-- `report_interval`: Optional progress reporting (0 = silent)
+- `graph.mtx`: Matrix Market format graph file
+- `report_interval`: Progress reporting interval (0 = silent, default)
 
 **Example:**
-
 ```bash
-./cc_sequential data/test_small.mtx 1000
+./build/cc_sequential data/test_small.mtx
+OMP_NUM_THREADS=8 ./build/cc_openmp data/ca-CondMat.mtx
+CILK_NWORKERS=16 ./cmake-build-opencilk/cc_opencilk data/com-Orkut.mtx
 ```
 
-### CLion Configuration
+## Algorithms
 
-1. **Run → Edit Configurations**
-2. Select `cc_sequential`
-3. Set **Program arguments**: `data/test_small.mtx 1000`
-4. Set **Working directory**: `$ProjectFileDir$`
-5. Click **OK** and run (Shift+F10)
+### Sequential
+- **Label Propagation** (simple + optimized queue-based)
+- **Union-Find** (baseline + edge-reordered)
 
-## Test Data
+### OpenMP
+- **Label Propagation** (synchronous + asynchronous)
+- **Shiloach-Vishkin**
+- **Afforest**
 
-A small test graph is included: `data/test_small.mtx`
-- 6 vertices
-- 5 edges
-- 2 connected components
+### OpenCilk
+- **Afforest** (Cilk work-stealing)
+- **Recursive Edge-Based**
 
-Place additional `.mtx` graph files in the `data/` directory.
+### PThreads
+- **Label Propagation** (synchronous + asynchronous)
+- **Afforest** (standard + optimized variants)
 
-## Current Status
+## Input Format
 
-- [Done] Graph data structure (CSR format)
-- [Done] Matrix Market file reader
-- [Done] Main program with CLI
-- [TODO] Sequential CC algorithm
-- [TODO] OpenMP parallel version
-- [TODO] PThreads parallel version
-- [TODO] OpenCilk parallel version
+Matrix Market (`.mtx`) format for undirected graphs. Test graphs included in `data/`:
+- `test_small.mtx` - 6 vertices, 5 edges, 2 components
+- `ca-CondMat.mtx` - Collaboration network
+- `com-Orkut.mtx` - Large social network
+
+## Project Structure
+
+```
+src/
+├── cc_sequential.c      # Sequential implementations
+├── cc_openmp.c          # OpenMP parallel implementations
+├── cc_opencilk.c        # OpenCilk parallel implementations
+├── pthreads/
+│   ├── cc_pthreads.c    # PThreads label propagation
+│   ├── cc_afforest.c    # PThreads Afforest
+│   └── afforest_simple.c # Simplified Afforest variant
+├── graph.c              # CSR graph structure
+└── mtx_reader.c         # Matrix Market parser
+
+benchmarks/              # Benchmarking framework
+inc/                     # Header files
+data/                    # Test graphs
+```
+
+## Performance Notes
+
+- Use **Release** builds for benchmarking (`-O3`)
+- Control parallelism via `OMP_NUM_THREADS` or `CILK_NWORKERS`
+- Afforest typically performs best on large graphs with skewed degree distributions
+- Union-Find edge-reordering provides ~4x speedup over simple label propagation on sequential

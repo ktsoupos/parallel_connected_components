@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <stdbool.h>
 
-CCResult *label_propagation_min(const Graph *g) {
+CCResult *label_propagation_min(const Graph *restrict g) {
     /* Check arguments */
     if (g == NULL) {
         fprintf(stderr, "Error: NULL graph pointer\n");
@@ -18,7 +18,7 @@ CCResult *label_propagation_min(const Graph *g) {
     }
 
     /* Allocate result structure */
-    CCResult *result = malloc(sizeof(CCResult));
+    CCResult *restrict result = malloc(sizeof(CCResult));
     if (result == NULL) {
         fprintf(stderr, "Error: Failed to allocate CCResult\n");
         return NULL;
@@ -32,30 +32,39 @@ CCResult *label_propagation_min(const Graph *g) {
         return NULL;
     }
 
-    /* Allocate queue arrays */
-    int32_t *queue = malloc(sizeof(int32_t) * (size_t) num_vertices);
-    int32_t *next_queue = malloc(sizeof(int32_t) * (size_t) num_vertices);
-    bool *in_queue = calloc((size_t) num_vertices, sizeof(bool));
+    /* Use restrict pointer for better optimization */
+    int32_t *restrict labels = result->labels;
 
-    if ((queue == NULL) || (next_queue == NULL) || (in_queue == NULL)) {
-        fprintf(stderr, "Error: Failed to allocate queue arrays\n");
+    /* Allocate temporary arrays in single block for better performance */
+    const size_t queue_size_bytes = sizeof(int32_t) * (size_t) num_vertices;
+    const size_t bool_size_bytes = sizeof(bool) * (size_t) num_vertices;
+
+    /* Ensure proper alignment: round up bool_size to multiple of int32_t alignment */
+    const size_t bool_size_aligned = ((bool_size_bytes + sizeof(int32_t) - 1) / sizeof(int32_t)) * sizeof(int32_t);
+    const size_t total_bytes = (2 * queue_size_bytes) + bool_size_aligned;
+
+    void *temp_memory = malloc(total_bytes);
+    if (temp_memory == NULL) {
+        fprintf(stderr, "Error: Failed to allocate temporary arrays\n");
         free(result->labels);
         free(result);
-        free(queue);
-        free(next_queue);
-        free(in_queue);
         return NULL;
     }
 
-    /* Keep original pointers for cleanup (since we swap pointers in the loop) */
-    int32_t *queue_orig = queue;
-    int32_t *next_queue_orig = next_queue;
+    /* Partition the single block into three arrays using pointer arithmetic
+     * Using pointer arithmetic avoids alignment warnings and is cleaner */
+    int32_t *queue = (int32_t *) temp_memory;
+    int32_t *next_queue = queue + num_vertices; /* Advance by num_vertices int32_t elements */
+    bool *in_queue = (bool *) (next_queue + num_vertices); /* Advance by another num_vertices */
+
+    /* Keep original pointer for cleanup (since we swap queue pointers in the loop) */
+    void *temp_memory_orig = temp_memory;
 
     /* Initialize: each vertex gets its own label, all vertices in queue */
     for (int32_t i = 0; i < num_vertices; i++) {
-        result->labels[i] = i;
+        labels[i] = i;
         queue[i] = i;
-        in_queue[i] = true; /* Mark all vertices as in queue initially */
+        in_queue[i] = false; /* in_queue tracks next_queue, initially empty */
     }
     int32_t queue_size = num_vertices;
 
@@ -80,9 +89,7 @@ CCResult *label_propagation_min(const Graph *g) {
             if ((v < 0) || (v >= num_vertices)) {
                 fprintf(stderr, "Error: Invalid vertex %d in queue (range: 0-%d)\n",
                         v, num_vertices - 1);
-                free(queue_orig);
-                free(next_queue_orig);
-                free(in_queue);
+                free(temp_memory_orig);
                 free(result->labels);
                 free(result);
                 return NULL;
@@ -90,14 +97,14 @@ CCResult *label_propagation_min(const Graph *g) {
 #endif
 
             int32_t num_neighbors;
-            const int32_t *neighbors = graph_get_neighbors(g, v, &num_neighbors);
+            const int32_t *restrict neighbors = graph_get_neighbors(g, v, &num_neighbors);
 
             if (neighbors == NULL) {
                 continue;
             }
 
             /* Find minimum label among neighbors in single pass */
-            int32_t min_label = result->labels[v];
+            int32_t min_label = labels[v];
             for (int32_t j = 0; j < num_neighbors; j++) {
                 const int32_t u = neighbors[j];
 
@@ -106,23 +113,21 @@ CCResult *label_propagation_min(const Graph *g) {
                 if ((u < 0) || (u >= num_vertices)) {
                     fprintf(stderr, "Error: Invalid neighbor index %d for vertex %d (range: 0-%d)\n",
                             u, v, num_vertices - 1);
-                    free(queue_orig);
-                    free(next_queue_orig);
-                    free(in_queue);
+                    free(temp_memory_orig);
                     free(result->labels);
                     free(result);
                     return NULL;
                 }
 #endif
 
-                if (result->labels[u] < min_label) {
-                    min_label = result->labels[u];
+                if (labels[u] < min_label) {
+                    min_label = labels[u];
                 }
             }
 
             /* Only update and propagate if label actually changed */
-            if (min_label < result->labels[v]) {
-                result->labels[v] = min_label;
+            if (min_label < labels[v]) {
+                labels[v] = min_label;
 
                 /* Add neighbors to next queue for propagation */
                 for (int32_t j = 0; j < num_neighbors; j++) {
@@ -134,9 +139,7 @@ CCResult *label_propagation_min(const Graph *g) {
                         if (next_size >= num_vertices) {
                             fprintf(stderr, "Error: Queue overflow at iteration %d\n",
                                     result->num_iterations);
-                            free(queue_orig);
-                            free(next_queue_orig);
-                            free(in_queue);
+                            free(temp_memory_orig);
                             free(result->labels);
                             free(result);
                             return NULL;
@@ -156,10 +159,8 @@ CCResult *label_propagation_min(const Graph *g) {
         queue_size = next_size;
     }
 
-    /* Cleanup queue arrays - use original pointers */
-    free(queue_orig);
-    free(next_queue_orig);
-    free(in_queue);
+    /* Cleanup temporary arrays - single free */
+    free(temp_memory_orig);
 
     /* Count connected components */
     result->num_components = count_unique_labels(result->labels, num_vertices);
@@ -169,6 +170,292 @@ CCResult *label_propagation_min(const Graph *g) {
         free(result);
         return NULL;
     }
+
+    return result;
+}
+
+CCResult *label_propagation_min_simple(const Graph *restrict g) {
+    /* Check arguments */
+    if (g == NULL) {
+        fprintf(stderr, "Error: NULL graph pointer\n");
+        return NULL;
+    }
+
+    const int32_t num_vertices = graph_get_num_vertices(g);
+    if (num_vertices <= 0) {
+        fprintf(stderr, "Error: Invalid number of vertices\n");
+        return NULL;
+    }
+
+    /* Allocate result structure */
+    CCResult *restrict result = malloc(sizeof(CCResult));
+    if (result == NULL) {
+        fprintf(stderr, "Error: Failed to allocate CCResult\n");
+        return NULL;
+    }
+
+    /* Allocate labels array */
+    result->labels = malloc(sizeof(int32_t) * (size_t) num_vertices);
+    if (result->labels == NULL) {
+        fprintf(stderr, "Error: Failed to allocate labels array\n");
+        free(result);
+        return NULL;
+    }
+
+    int32_t *restrict labels = result->labels;
+
+    /* Initialize: each vertex gets its own label */
+    for (int32_t i = 0; i < num_vertices; i++) {
+        labels[i] = i;
+    }
+
+    /* Simple label propagation - process all vertices each iteration */
+    result->num_iterations = 0;
+    bool changed = true;
+
+    while (changed) {
+        result->num_iterations++;
+        changed = false;
+
+        /* Process all vertices */
+        for (int32_t v = 0; v < num_vertices; v++) {
+            int32_t num_neighbors;
+            const int32_t *restrict neighbors = graph_get_neighbors(g, v, &num_neighbors);
+
+            if (neighbors == NULL) {
+                continue;
+            }
+
+            /* Find minimum label among neighbors */
+            int32_t min_label = labels[v];
+            for (int32_t j = 0; j < num_neighbors; j++) {
+                const int32_t u = neighbors[j];
+
+                if (labels[u] < min_label) {
+                    min_label = labels[u];
+                }
+            }
+
+            /* Update if found smaller label */
+            if (min_label < labels[v]) {
+                labels[v] = min_label;
+                changed = true;
+            }
+        }
+    }
+
+    /* Count connected components */
+    result->num_components = count_unique_labels(result->labels, num_vertices);
+    if (result->num_components < 0) {
+        fprintf(stderr, "Error: Failed to count components\n");
+        free(result->labels);
+        free(result);
+        return NULL;
+    }
+
+    return result;
+}
+
+/* Union-Find helper: find with path halving (single pass)
+ * Path halving: make every node point to its grandparent
+ * Nearly as effective as full path compression but faster (one pass) */
+static int32_t uf_find(int32_t *restrict parent, int32_t x) {
+    while (parent[x] != x) {
+        const int32_t next = parent[x];
+        parent[x] = parent[next];  /* Point to grandparent */
+        x = next;  /* Move to original parent */
+    }
+    return x;
+}
+
+CCResult *union_find_cc(const Graph *restrict g) {
+    /* Check arguments */
+    if (g == NULL) {
+        fprintf(stderr, "Error: NULL graph pointer\n");
+        return NULL;
+    }
+
+    const int32_t num_vertices = graph_get_num_vertices(g);
+    if (num_vertices <= 0) {
+        fprintf(stderr, "Error: Invalid number of vertices\n");
+        return NULL;
+    }
+
+    /* Allocate result structure */
+    CCResult *restrict result = malloc(sizeof(CCResult));
+    if (result == NULL) {
+        fprintf(stderr, "Error: Failed to allocate CCResult\n");
+        return NULL;
+    }
+
+    /* Allocate parent array */
+    int32_t *parent = malloc(sizeof(int32_t) * (size_t) num_vertices);
+
+    if (parent == NULL) {
+        fprintf(stderr, "Error: Failed to allocate parent array\n");
+        free(result);
+        return NULL;
+    }
+
+    for (int32_t i = 0; i < num_vertices; i++) {
+        parent[i] = i;
+    }
+
+    /* Process all edges: union endpoints with cached roots */
+    for (int32_t v = 0; v < num_vertices; v++) {
+        int32_t num_neighbors = 0;
+        const int32_t *restrict neighbors = graph_get_neighbors(g, v, &num_neighbors);
+
+        if (neighbors == NULL) {
+            continue;
+        }
+
+        /* Cache root of v to avoid repeated find operations */
+        int32_t root_v = uf_find(parent, v);
+
+        for (int32_t j = 0; j < num_neighbors; j++) {
+            const int32_t u = neighbors[j];
+
+            /* Find root of u */
+            const int32_t root_u = uf_find(parent, u);
+
+            /* Direct union of roots (skip redundant finds) */
+            if (root_v != root_u) {
+                if (root_v < root_u) {
+                    parent[root_u] = root_v;
+                } else {
+                    parent[root_v] = root_u;
+                    root_v = root_u; // Update cached root
+                }
+            }
+        }
+    }
+
+    /* Allocate labels array */
+    result->labels = malloc(sizeof(int32_t) * (size_t) num_vertices);
+    if (result->labels == NULL) {
+        fprintf(stderr, "Error: Failed to allocate labels array\n");
+        free(parent);
+        free(result);
+        return NULL;
+    }
+
+    /* Final path compression: assign minimum labels
+     * Union-by-minimum ensures roots are already minimum IDs */
+    for (int32_t i = 0; i < num_vertices; i++) {
+        result->labels[i] = uf_find(parent, i);
+    }
+
+    /* Union-Find processes edges once, no iterations */
+    result->num_iterations = 1;
+
+    /* Count connected components */
+    result->num_components = count_unique_labels(result->labels, num_vertices);
+    if (result->num_components < 0) {
+        fprintf(stderr, "Error: Failed to count components\n");
+        free(parent);
+        free(result->labels);
+        free(result);
+        return NULL;
+    }
+
+    /* Cleanup parent array */
+    free(parent);
+
+    return result;
+}
+
+CCResult *union_find_cc_edge_reorder(const Graph *restrict g) {
+    /* Check arguments */
+    if (g == NULL) {
+        fprintf(stderr, "Error: NULL graph pointer\n");
+        return NULL;
+    }
+
+    const int32_t num_vertices = graph_get_num_vertices(g);
+    if (num_vertices <= 0) {
+        fprintf(stderr, "Error: Invalid number of vertices\n");
+        return NULL;
+    }
+
+    /* Allocate result structure */
+    CCResult *restrict result = malloc(sizeof(CCResult));
+    if (result == NULL) {
+        fprintf(stderr, "Error: Failed to allocate CCResult\n");
+        return NULL;
+    }
+
+    /* Allocate parent array */
+    int32_t *parent = malloc(sizeof(int32_t) * (size_t) num_vertices);
+
+    if (parent == NULL) {
+        fprintf(stderr, "Error: Failed to allocate parent array\n");
+        free(result);
+        return NULL;
+    }
+
+    for (int32_t i = 0; i < num_vertices; i++) {
+        parent[i] = i;
+    }
+
+    /* Process edges with reordering: only process edge (v,u) where v < u
+     * This processes each undirected edge exactly once, improving cache locality */
+    for (int32_t v = 0; v < num_vertices; v++) {
+        int32_t num_neighbors = 0;
+        const int32_t *restrict neighbors = graph_get_neighbors(g, v, &num_neighbors);
+
+        if (neighbors == NULL) {
+            continue;
+        }
+
+        /* Cache root of v to avoid repeated find operations */
+        int32_t root_v = uf_find(parent, v);
+
+        for (int32_t j = 0; j < num_neighbors; j++) {
+            const int32_t u = neighbors[j];
+            if (u > v) {  /* Only process if u > v */
+                const int32_t root_u = uf_find(parent, u);
+                if (root_v != root_u) {
+                    if (root_v < root_u) {
+                        parent[root_u] = root_v;
+                    } else {
+                        parent[root_v] = root_u;
+                        root_v = root_u;
+                    }
+                }
+            }
+        }
+    }
+
+    /* Allocate labels array */
+    result->labels = malloc(sizeof(int32_t) * (size_t) num_vertices);
+    if (result->labels == NULL) {
+        fprintf(stderr, "Error: Failed to allocate labels array\n");
+        free(parent);
+        free(result);
+        return NULL;
+    }
+
+    /* Final path compression: assign minimum labels */
+    for (int32_t i = 0; i < num_vertices; i++) {
+        result->labels[i] = uf_find(parent, i);
+    }
+
+    /* Union-Find processes edges once, no iterations */
+    result->num_iterations = 1;
+
+    /* Count connected components */
+    result->num_components = count_unique_labels(result->labels, num_vertices);
+    if (result->num_components < 0) {
+        fprintf(stderr, "Error: Failed to count components\n");
+        free(parent);
+        free(result->labels);
+        free(result);
+        return NULL;
+    }
+
+    /* Cleanup parent array */
+    free(parent);
 
     return result;
 }

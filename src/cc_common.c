@@ -1,4 +1,6 @@
 #include "cc_common.h"
+
+#include <stdbool.h>
 #include <stdlib.h>
 #include <stdio.h>
 
@@ -90,3 +92,5 @@ void print_component_stats(const int32_t* labels, const int32_t num_vertices) {
 
     free(component_sizes);
 }
+
+

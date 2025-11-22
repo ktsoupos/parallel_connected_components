@@ -136,7 +136,7 @@ int32_t graph_finalize(Graph* g) {
 
     /* Copy adjacency lists to col_idx */
     for (int32_t i = 0; i < g->num_vertices; i++) {
-        int32_t offset = g->row_ptr[i];
+        const int32_t offset = g->row_ptr[i];
         (void)memcpy(&g->col_idx[offset], g->adj_lists[i],
                      (size_t)g->degrees[i] * sizeof(int32_t));
     }
