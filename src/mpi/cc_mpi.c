@@ -1,13 +1,207 @@
 #include "cc_mpi.h"
 
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
+
+/**
+ * Buffer for organizing remote edge requests to a specific process
+ */
+typedef struct {
+    int32_t *local_vertices; // Local indices that need remote linking
+    int32_t *global_vertices; // Global IDs to query from this process
+    int32_t *parent_values; // Parent values received back
+    int32_t count; // Number of requests
+    int32_t capacity; // Allocated space
+} RemoteBuffer;
+
+/**
+ * MPI communication metadata for Alltoallv operations
+ */
+typedef struct {
+    int32_t *send_counts; // [num_ranks] - items to send to each rank
+    int32_t *recv_counts; // [num_ranks] - items to receive from each rank
+    int32_t *send_displs; // [num_ranks] - displacements for sending
+    int32_t *recv_displs; // [num_ranks] - displacements for receiving
+    int32_t total_send; // Total items to send
+    int32_t total_recv; // Total items to receive
+} CommData;
+
+/* ============ REMOTE BUFFER MANAGEMENT ============ */
+
+/**
+ * Estimate initial capacity for remote buffers based on graph structure
+ */
+static int32_t estimate_remote_capacity(const DistributedGraph *dg, int32_t neighbor_rounds) {
+    if (dg->l_num_vertices == 0)
+        return 256;
+
+    // Average degree per vertex
+    int32_t avg_degree = dg->l_num_edges / dg->l_num_vertices;
+
+    // Estimate: (avg_degree * neighbor_rounds * probability_remote)
+    // probability_remote ≈ (num_ranks - 1) / num_ranks
+    int32_t estimated = (avg_degree * neighbor_rounds * (dg->num_ranks - 1)) / dg->num_ranks;
+
+    // Per-rank estimate (edges distributed across all ranks)
+    estimated = estimated / dg->num_ranks;
+
+    // Safety margin (2x) and bounds
+    estimated *= 2;
+    if (estimated < 256)
+        estimated = 256;
+    if (estimated > 65536)
+        estimated = 65536;
+
+    return estimated;
+}
+
+/**
+ * Allocate array of RemoteBuffers (one per MPI rank)
+ */
+static RemoteBuffer *alloc_remote_buffers(int num_ranks, int32_t initial_capacity) {
+    RemoteBuffer *buffers = calloc((size_t)num_ranks, sizeof(RemoteBuffer));
+    if (buffers == NULL) {
+        fprintf(stderr, "Error: Failed to allocate remote buffers\n");
+        return NULL;
+    }
+
+    for (int i = 0; i < num_ranks; i++) {
+        buffers[i].capacity = initial_capacity;
+        buffers[i].count = 0;
+        buffers[i].local_vertices = malloc(sizeof(int32_t) * (size_t)initial_capacity);
+        buffers[i].global_vertices = malloc(sizeof(int32_t) * (size_t)initial_capacity);
+        buffers[i].parent_values = malloc(sizeof(int32_t) * (size_t)initial_capacity);
+
+        if (buffers[i].local_vertices == NULL ||
+            buffers[i].global_vertices == NULL ||
+            buffers[i].parent_values == NULL) {
+            fprintf(stderr, "Error: Failed to allocate buffer arrays\n");
+            for (int j = 0; j < num_ranks; j++) {
+                free(buffers[j].local_vertices);
+                buffers[j].local_vertices = NULL;
+                free(buffers[j].global_vertices);
+                buffers[j].global_vertices = NULL;
+                free(buffers[j].parent_values);
+                buffers[j].parent_values = NULL;
+            }
+            free(buffers);
+            return NULL;
+        }
+    }
+
+    return buffers;
+}
+
+/**
+ * Add a remote edge to the appropriate buffer, resizing if necessary
+ */
+static int add_remote_edge(RemoteBuffer *buf, int32_t local_u, int32_t global_v) {
+    // Check if buffer is full
+    if (buf->count >= buf->capacity) {
+        // Double the capacity
+        int32_t new_capacity = buf->capacity * 2;
+
+        int32_t *new_local = realloc(buf->local_vertices, sizeof(int32_t) * (size_t)new_capacity);
+        int32_t *new_global = realloc(buf->global_vertices, sizeof(int32_t) * (size_t)new_capacity);
+        int32_t *new_parents = realloc(buf->parent_values, sizeof(int32_t) * (size_t)new_capacity);
+
+        if (new_local == NULL || new_global == NULL || new_parents == NULL) {
+            fprintf(stderr, "Error: Failed to resize remote buffer\n");
+            free(new_local);
+            free(new_global);
+            free(new_parents);
+            return -1;
+        }
+
+        buf->local_vertices = new_local;
+        buf->global_vertices = new_global;
+        buf->parent_values = new_parents;
+        buf->capacity = new_capacity;
+    }
+
+    // Add the edge
+    buf->local_vertices[buf->count] = local_u;
+    buf->global_vertices[buf->count] = global_v;
+    buf->count++;
+
+    return 0;
+}
+
+/* ============ COMMUNICATION DATA MANAGEMENT ============ */
+
+/**
+ * Allocate CommData structure
+ */
+static CommData *alloc_comm_data(int num_ranks) {
+    CommData *comm = malloc(sizeof(CommData));
+    if (comm == NULL) {
+        fprintf(stderr, "Error: Failed to allocate CommData\n");
+        return NULL;
+    }
+
+    comm->send_counts = calloc((size_t)num_ranks, sizeof(int32_t));
+    comm->recv_counts = calloc((size_t)num_ranks, sizeof(int32_t));
+    comm->send_displs = calloc((size_t)num_ranks, sizeof(int32_t));
+    comm->recv_displs = calloc((size_t)num_ranks, sizeof(int32_t));
+
+    if (comm->send_counts == NULL || comm->recv_counts == NULL ||
+        comm->send_displs == NULL || comm->recv_displs == NULL) {
+        fprintf(stderr, "Error: Failed to allocate CommData arrays\n");
+        free(comm->send_counts);
+        comm->send_counts = NULL;
+        free(comm->recv_counts);
+        comm->recv_counts = NULL;
+        free(comm->send_displs);
+        comm->send_displs = NULL;
+        free(comm->recv_displs);
+        comm->recv_displs = NULL;
+        free(comm);
+        return NULL;
+    }
+
+    comm->total_send = 0;
+    comm->total_recv = 0;
+
+    return comm;
+}
+
+/**
+ * Prepare communication metadata from remote buffers
+ */
+static CommData *prepare_comm_data(RemoteBuffer *buffers, int num_ranks, MPI_Comm mpi_comm) {
+    CommData *comm = alloc_comm_data(num_ranks);
+    if (comm == NULL)
+        return NULL;
+
+    // Fill send counts from buffer counts
+    for (int i = 0; i < num_ranks; i++) {
+        comm->send_counts[i] = buffers[i].count;
+    }
+
+    // Exchange counts with all processes
+    MPI_Alltoall(comm->send_counts, 1, MPI_INT32_T,
+                 comm->recv_counts, 1, MPI_INT32_T, mpi_comm);
+
+    // Calculate displacements and totals
+    comm->send_displs[0] = 0;
+    comm->recv_displs[0] = 0;
+
+    for (int i = 1; i < num_ranks; i++) {
+        comm->send_displs[i] = comm->send_displs[i - 1] + comm->send_counts[i - 1];
+        comm->recv_displs[i] = comm->recv_displs[i - 1] + comm->recv_counts[i - 1];
+    }
+
+    comm->total_send = comm->send_displs[num_ranks - 1] + comm->send_counts[num_ranks - 1];
+    comm->total_recv = comm->recv_displs[num_ranks - 1] + comm->recv_counts[num_ranks - 1];
+
+    return comm;
+}
+
+/* ============ GRAPH PARTITIONING ============ */
 
 int partition_graph(const Graph *global_graph, DistributedGraph **dist_graph, MPI_Comm comm) {
-    if (global_graph == NULL) {
-        fprintf(stderr, "Error: NULL global_graph pointer\n");
-        return -1;
-    }
     if (dist_graph == NULL) {
         fprintf(stderr, "Error: NULL dist_graph pointer\n");
         return -1;
@@ -18,7 +212,7 @@ int partition_graph(const Graph *global_graph, DistributedGraph **dist_graph, MP
     MPI_Comm_size(comm, &num_ranks);
 
     // Only rank 0 should have a valid global_graph
-    if (rank == 0) {
+    if (rank == 0 && global_graph == NULL) {
         fprintf(stderr, "Error: NULL global_graph pointer on rank 0\n");
         return -1;
     }
@@ -128,8 +322,8 @@ int partition_graph(const Graph *global_graph, DistributedGraph **dist_graph, MP
         for (int i = 0; i < num_ranks; i++) {
             const int v_offset = i * verts_per_proc;
             const int v_count = (i == num_ranks - 1)
-                              ? (g_num_vertices - v_offset)
-                              : verts_per_proc;
+                                    ? (g_num_vertices - v_offset)
+                                    : verts_per_proc;
 
             const int edge_start = global_graph->row_ptr[v_offset];
             const int edge_end = global_graph->row_ptr[v_offset + v_count];
@@ -156,4 +350,486 @@ int partition_graph(const Graph *global_graph, DistributedGraph **dist_graph, MP
     free(displs);
 
     return 0;
+}
+
+/**
+ * Link two vertices u and v using union-find with path compression
+ * Based on the Link function from the GAP Benchmark Suite Afforest implementation
+ */
+__attribute__((always_inline)) inline static void link_vertices(const int32_t u, const int32_t v,
+                                                                int32_t *restrict parents) {
+    /* Read parent values */
+    int32_t p1 = parents[u];
+    int32_t p2 = parents[v];
+
+    while (p1 != p2) {
+        const int32_t high = (p1 > p2) ? p1 : p2;
+        const int32_t low = (p1 < p2) ? p1 : p2;
+        const int32_t p_high = parents[high];
+        int32_t expected = high;
+
+        if ((p_high == low) || // Was already 'low'
+            (p_high == high &&
+             (__atomic_compare_exchange_n( // Succeeded on writing 'low'
+                 &parents[high], &expected, low, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)))) {
+            break;
+        }
+
+        p1 = parents[expected]; // Update with actual value after CAS
+        p2 = parents[low];
+    }
+}
+
+__attribute__((always_inline)) inline static int get_owner_rank(
+    int32_t global_vertex_id, const DistributedGraph *dg) {
+    int32_t verts_per_proc = dg->g_num_vertices / dg->num_ranks;
+    int owner = global_vertex_id / verts_per_proc;
+
+    // Handle last rank which may have more vertices
+    if (owner >= dg->num_ranks) {
+        owner = dg->num_ranks - 1;
+    }
+
+    return owner;
+}
+
+static void link_with_remote_parent(int32_t u_local, int32_t remote_parent_global,
+                                    int32_t *parents) {
+    int32_t u_parent = parents[u_local];
+
+    while (u_parent != remote_parent_global) {
+        const int32_t high = (u_parent > remote_parent_global) ? u_parent : remote_parent_global;
+        const int32_t low = (u_parent < remote_parent_global) ? u_parent : remote_parent_global;
+
+        // If u's parent is the higher one, try to update it
+        if (u_parent == high) {
+            int32_t expected = u_parent;
+            if (__atomic_compare_exchange_n(&parents[u_local], &expected, low,
+                                            false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
+                break; // Successfully updated
+            }
+            u_parent = expected; // CAS failed, retry with new value
+        } else {
+            // Remote parent is higher, nothing to update locally
+            break;
+        }
+    }
+}
+
+static void exchange_and_link_remote(RemoteBuffer *buffers, int32_t *parents,
+                                     const DistributedGraph *dg) {
+    CommData *comm = prepare_comm_data(buffers, dg->num_ranks, dg->comm);
+    if (comm == NULL) {
+        fprintf(stderr, "Error: Failed to prepare communication data\n");
+        return;
+    }
+
+    // Early exit if no communication needed
+    if (comm->total_send == 0 && comm->total_recv == 0) {
+        free(comm->send_counts);
+        comm->send_counts = NULL;
+        free(comm->recv_counts);
+        comm->recv_counts = NULL;
+        free(comm->send_displs);
+        comm->send_displs = NULL;
+        free(comm->recv_displs);
+        comm->recv_displs = NULL;
+        free(comm);
+        return;
+    }
+
+    int32_t *send_buf = malloc(sizeof(int32_t) * (size_t)comm->total_send);
+    if (send_buf == NULL) {
+        fprintf(stderr, "Error: Failed to allocate send buffer\n");
+        free(comm->send_counts);
+        comm->send_counts = NULL;
+        free(comm->recv_counts);
+        comm->recv_counts = NULL;
+        free(comm->send_displs);
+        comm->send_displs = NULL;
+        free(comm->recv_displs);
+        comm->recv_displs = NULL;
+        free(comm);
+        return;
+    }
+
+    int idx = 0;
+    for (int rank = 0; rank < dg->num_ranks; rank++) {
+        for (int i = 0; i < buffers[rank].count; i++) {
+            send_buf[idx++] = buffers[rank].global_vertices[i];
+        }
+    }
+
+    int32_t *recv_buf = malloc(sizeof(int32_t) * (size_t)comm->total_recv);
+    if (recv_buf == NULL) {
+        fprintf(stderr, "Error: Failed to allocate recv buffer\n");
+        free(send_buf);
+        free(comm->send_counts);
+        comm->send_counts = NULL;
+        free(comm->recv_counts);
+        comm->recv_counts = NULL;
+        free(comm->send_displs);
+        comm->send_displs = NULL;
+        free(comm->recv_displs);
+        comm->recv_displs = NULL;
+        free(comm);
+        return;
+    }
+    MPI_Alltoallv(
+        send_buf, comm->send_counts, comm->send_displs, MPI_INT32_T,
+        recv_buf, comm->recv_counts, comm->recv_displs, MPI_INT32_T,
+        dg->comm
+        );
+
+    int32_t *response_buf = malloc(sizeof(int32_t) * (size_t)comm->total_recv);
+    if (response_buf == NULL) {
+        fprintf(stderr, "Error: Failed to allocate response buffer\n");
+        free(send_buf);
+        free(recv_buf);
+        free(comm->send_counts);
+        comm->send_counts = NULL;
+        free(comm->recv_counts);
+        comm->recv_counts = NULL;
+        free(comm->send_displs);
+        comm->send_displs = NULL;
+        free(comm->recv_displs);
+        comm->recv_displs = NULL;
+        free(comm);
+        return;
+    }
+
+    // For each requested vertex, lookup its parent value
+    for (int i = 0; i < comm->total_recv; i++) {
+        const int32_t global_id = recv_buf[i];
+        const int32_t local_id = global_id - dg->vertex_offset;
+
+        // Lookup parent value for this vertex
+        response_buf[i] = parents[local_id];
+    }
+    int32_t *parent_recv_buf = malloc(sizeof(int32_t) * (size_t)comm->total_send);
+    if (parent_recv_buf == NULL) {
+        fprintf(stderr, "Error: Failed to allocate parent receive buffer\n");
+        free(send_buf);
+        free(recv_buf);
+        free(response_buf);
+        free(comm->send_counts);
+        comm->send_counts = NULL;
+        free(comm->recv_counts);
+        comm->recv_counts = NULL;
+        free(comm->send_displs);
+        comm->send_displs = NULL;
+        free(comm->recv_displs);
+        comm->recv_displs = NULL;
+        free(comm);
+        return;
+    }
+
+    // Exchange: Send parent values back, receive parent values you requested
+    // Note: send and recv are swapped
+    MPI_Alltoallv(
+        response_buf, comm->recv_counts, comm->recv_displs, MPI_INT32_T,
+        parent_recv_buf, comm->send_counts, comm->send_displs, MPI_INT32_T,
+        dg->comm
+        );
+
+    idx = 0;
+    for (int rank = 0; rank < dg->num_ranks; rank++) {
+        for (int i = 0; i < buffers[rank].count; i++) {
+            const int32_t u_local = buffers[rank].local_vertices[i];
+            const int32_t parent_v = parent_recv_buf[idx++];
+
+            // Link u with the remote parent value
+            link_with_remote_parent(u_local, parent_v, parents);
+        }
+    }
+
+    free(send_buf);
+    free(recv_buf);
+    free(response_buf);
+    free(parent_recv_buf);
+    free(comm->send_counts);
+    comm->send_counts = NULL;
+    free(comm->recv_counts);
+    comm->recv_counts = NULL;
+    free(comm->send_displs);
+    comm->send_displs = NULL;
+    free(comm->recv_displs);
+    comm->recv_displs = NULL;
+    free(comm);
+}
+
+
+static void compress_local(int32_t *parents, int32_t num_vertices,
+                           int32_t vertex_offset, int32_t l_num_vertices) {
+    for (int32_t n = 0; n < num_vertices; n++) {
+        const int32_t parent_global = parents[n];
+        // Check if parent is a local vertex
+        if (parent_global >= vertex_offset &&
+            parent_global < vertex_offset + l_num_vertices) {
+
+            // Parent is local - convert to local index
+            const int32_t parent_local = parent_global - vertex_offset;
+            const int32_t grandparent_global = parents[parent_local];
+
+            // Compress: point directly to grandparent
+            if (grandparent_global != parent_global) {
+                parents[n] = grandparent_global;
+            }
+        }
+        // If parent is remote, we can't compress without communication
+    }
+}
+
+
+CCResult *afforest_mpi(const DistributedGraph *dist_graph, int32_t neighbor_rounds) {
+    if (dist_graph == NULL) {
+        fprintf(stderr, "Error: DistributedGraph is NULL\n");
+        return NULL;
+    }
+
+    int32_t *parents = aligned_alloc(64, sizeof(int32_t) * (size_t)dist_graph->l_num_vertices);
+    if (parents == NULL) {
+        fprintf(stderr, "Error: aligned_alloc failed\n");
+        return NULL;
+    }
+    for (int32_t i = 0; i < dist_graph->l_num_vertices; i++) {
+        parents[i] = i + dist_graph->vertex_offset;
+    }
+
+    if (neighbor_rounds <= 0) {
+        neighbor_rounds = 2; // fine-tuned
+    }
+
+    // Allocate remote buffers for cross-partition edges
+    const int32_t initial_capacity = estimate_remote_capacity(dist_graph, neighbor_rounds);
+    RemoteBuffer *remote_bufs = alloc_remote_buffers(dist_graph->num_ranks, initial_capacity);
+    if (remote_bufs == NULL) {
+        fprintf(stderr, "Error: Failed to allocate remote buffers\n");
+        free(parents);
+        return NULL;
+    }
+
+    // Neighbor sampling rounds - collect local and remote edges
+    for (int32_t r = 0; r < neighbor_rounds; r++) {
+        for (int32_t u = 0; u < dist_graph->l_num_vertices; u++) {
+            const int32_t start = dist_graph->local_row_ptr[u];
+            const int32_t end = dist_graph->local_row_ptr[u + 1];
+            const int32_t num_neighbors = end - start;
+
+            if (r < num_neighbors) {
+                const int32_t v = dist_graph->local_col_idx[start + r]; // get the r-th neighbor
+                const bool is_local = (v >= dist_graph->vertex_offset) &&
+                                      (v < dist_graph->vertex_offset + dist_graph->l_num_vertices);
+
+                if (is_local) {
+                    // Local edge - link immediately
+                    const int32_t v_local = v - dist_graph->vertex_offset;
+                    link_vertices(u, v_local, parents);
+                } else {
+                    // Remote edge - buffer for later exchange
+                    const int owner = get_owner_rank(v, dist_graph);
+                    add_remote_edge(&remote_bufs[owner], u, v);
+                }
+            }
+        }
+    }
+
+    // Exchange and link remote edges (batched communication)
+    exchange_and_link_remote(remote_bufs, parents, dist_graph);
+
+    // Cleanup remote buffers
+    for (int i = 0; i < dist_graph->num_ranks; i++) {
+        free(remote_bufs[i].local_vertices);
+        remote_bufs[i].local_vertices = NULL;
+        free(remote_bufs[i].global_vertices);
+        remote_bufs[i].global_vertices = NULL;
+        free(remote_bufs[i].parent_values);
+        remote_bufs[i].parent_values = NULL;
+    }
+    free(remote_bufs);
+
+    // Compress parent pointers (one-hop local compression)
+    compress_local(parents, dist_graph->l_num_vertices,
+                   dist_graph->vertex_offset, dist_graph->l_num_vertices);
+
+    // Phase 3: Sample to identify largest component
+    #define NUM_SAMPLES 1024
+
+    int32_t *sample_counts = calloc((size_t)dist_graph->g_num_vertices, sizeof(int32_t));
+    if (sample_counts == NULL) {
+        fprintf(stderr, "Error: Failed to allocate sample counts\n");
+        free(parents);
+        return NULL;
+    }
+
+    // Sample with replacement
+    unsigned int seed = (unsigned int)(dist_graph->rank + time(NULL));
+    for (int32_t i = 0; i < NUM_SAMPLES; i++) {
+        int32_t idx = rand_r(&seed) % dist_graph->l_num_vertices;
+        int32_t component_id = parents[idx];
+
+        if (component_id >= 0 && component_id < dist_graph->g_num_vertices) {
+            sample_counts[component_id]++;
+        }
+    }
+
+    // Global reduction to sum sample counts
+    int32_t *global_sample_counts = malloc(sizeof(int32_t) * (size_t)dist_graph->g_num_vertices);
+    if (global_sample_counts == NULL) {
+        fprintf(stderr, "Error: Failed to allocate global sample counts\n");
+        free(sample_counts);
+        free(parents);
+        return NULL;
+    }
+
+    MPI_Allreduce(sample_counts, global_sample_counts, dist_graph->g_num_vertices,
+                  MPI_INT32_T, MPI_SUM, dist_graph->comm);
+    free(sample_counts);
+
+    // Find the largest component
+    int32_t largest_component = 0;
+    int32_t max_count = 0;
+
+    for (int32_t i = 0; i < dist_graph->g_num_vertices; i++) {
+        if (global_sample_counts[i] > max_count) {
+            max_count = global_sample_counts[i];
+            largest_component = i;
+        }
+    }
+    free(global_sample_counts);
+
+    if (dist_graph->rank == 0 && max_count > 0) {
+        float percentage = (float)max_count / ((float)NUM_SAMPLES * (float)dist_graph->num_ranks) * 100.0f;
+        printf("Skipping largest component (ID: %d, %.1f%% of samples)\n",
+               largest_component, percentage);
+    }
+
+    // Phase 4: Final linking phase - process remaining neighbors
+    RemoteBuffer *final_remote_bufs = alloc_remote_buffers(dist_graph->num_ranks, initial_capacity);
+    if (final_remote_bufs == NULL) {
+        fprintf(stderr, "Error: Failed to allocate final remote buffers\n");
+        free(parents);
+        return NULL;
+    }
+
+    for (int32_t u = 0; u < dist_graph->l_num_vertices; u++) {
+        // Skip vertices already in largest component
+        if (parents[u] == largest_component) {
+            continue;
+        }
+
+        const int32_t start = dist_graph->local_row_ptr[u];
+        const int32_t end = dist_graph->local_row_ptr[u + 1];
+        const int32_t num_neighbors = end - start;
+
+        // Process remaining neighbors (after neighbor_rounds)
+        for (int32_t j = neighbor_rounds; j < num_neighbors; j++) {
+            const int32_t v = dist_graph->local_col_idx[start + j];
+            const bool is_local = (v >= dist_graph->vertex_offset) &&
+                                  (v < dist_graph->vertex_offset + dist_graph->l_num_vertices);
+
+            if (is_local) {
+                const int32_t v_local = v - dist_graph->vertex_offset;
+                link_vertices(u, v_local, parents);
+            } else {
+                const int owner = get_owner_rank(v, dist_graph);
+                add_remote_edge(&final_remote_bufs[owner], u, v);
+            }
+        }
+    }
+
+    // Exchange and link final remote edges
+    exchange_and_link_remote(final_remote_bufs, parents, dist_graph);
+    for (int i = 0; i < dist_graph->num_ranks; i++) {
+        free(final_remote_bufs[i].local_vertices);
+        final_remote_bufs[i].local_vertices = NULL;
+        free(final_remote_bufs[i].global_vertices);
+        final_remote_bufs[i].global_vertices = NULL;
+        free(final_remote_bufs[i].parent_values);
+        final_remote_bufs[i].parent_values = NULL;
+    }
+    free(final_remote_bufs);
+
+    // Phase 5: Final compression
+    compress_local(parents, dist_graph->l_num_vertices,
+                   dist_graph->vertex_offset, dist_graph->l_num_vertices);
+
+    // Phase 6: Count components - gather all parents to rank 0
+    int32_t *all_parents = NULL;
+    int32_t *recvcounts = NULL;
+    int32_t *displs = NULL;
+
+    if (dist_graph->rank == 0) {
+        all_parents = malloc(sizeof(int32_t) * (size_t)dist_graph->g_num_vertices);
+        recvcounts = malloc(sizeof(int32_t) * (size_t)dist_graph->num_ranks);
+        displs = malloc(sizeof(int32_t) * (size_t)dist_graph->num_ranks);
+
+        if (all_parents == NULL || recvcounts == NULL || displs == NULL) {
+            fprintf(stderr, "Error: Failed to allocate gathering buffers\n");
+            free(all_parents);
+            free(recvcounts);
+            free(displs);
+            free(parents);
+            return NULL;
+        }
+
+        int32_t verts_per_proc = dist_graph->g_num_vertices / dist_graph->num_ranks;
+        for (int i = 0; i < dist_graph->num_ranks; i++) {
+            int offset = i * verts_per_proc;
+            recvcounts[i] = (i == dist_graph->num_ranks - 1)
+                ? (dist_graph->g_num_vertices - offset)
+                : verts_per_proc;
+            displs[i] = offset;
+        }
+    }
+
+    MPI_Gatherv(parents, dist_graph->l_num_vertices, MPI_INT32_T,
+                all_parents, recvcounts, displs, MPI_INT32_T,
+                0, dist_graph->comm);
+
+    int32_t num_components = 0;
+    if (dist_graph->rank == 0) {
+        // Count unique component IDs
+        bool *seen = calloc((size_t)dist_graph->g_num_vertices, sizeof(bool));
+        if (seen == NULL) {
+            fprintf(stderr, "Error: Failed to allocate seen array\n");
+            free(all_parents);
+            free(recvcounts);
+            free(displs);
+            free(parents);
+            return NULL;
+        }
+
+        for (int32_t i = 0; i < dist_graph->g_num_vertices; i++) {
+            int32_t root = all_parents[i];
+            if (root >= 0 && root < dist_graph->g_num_vertices && !seen[root]) {
+                seen[root] = true;
+                num_components++;
+            }
+        }
+
+        free(seen);
+        free(all_parents);
+        free(recvcounts);
+        free(displs);
+
+        printf("Found %d connected components\n", num_components);
+    }
+
+    // Broadcast component count to all processes
+    MPI_Bcast(&num_components, 1, MPI_INT32_T, 0, dist_graph->comm);
+
+    // Build and return result
+    CCResult *result = malloc(sizeof(CCResult));
+    if (result == NULL) {
+        fprintf(stderr, "Error: Failed to allocate CCResult\n");
+        free(parents);
+        return NULL;
+    }
+
+    result->labels = parents;
+    result->num_components = num_components;
+    result->num_iterations = neighbor_rounds + 1;
+
+    return result;
 }

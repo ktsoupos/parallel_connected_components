@@ -1,4 +1,6 @@
 #pragma once
+#include "cc_sequential.h"
+
 #include <mpi.h>
 #include <stdint.h>
 
@@ -15,7 +17,8 @@ typedef struct {
     int rank;
     int num_ranks;
     MPI_Comm comm;
-} DistributedGraph;
+    char buff[8];
+}  __attribute__((aligned(64))) DistributedGraph;
 
 /**
  * Partition and distribute graph across processes
@@ -26,3 +29,5 @@ typedef struct {
  * @return 0 on success, non-zero on error
  */
 int partition_graph(const Graph *global_graph, DistributedGraph **dist_graph, MPI_Comm comm);
+
+CCResult* afforest_mpi(const DistributedGraph *dist_graph, int32_t neighbor_rounds);
