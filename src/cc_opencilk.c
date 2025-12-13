@@ -2,11 +2,11 @@
 #include "cc_common.h"
 
 #include <cilk/cilk.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <time.h>
 #include <string.h>
-#include <stdbool.h>
+#include <time.h>
 
 #include "cilk_stub.h"
 
@@ -15,26 +15,22 @@
  * Based on the Link function from the GAP Benchmark Suite Afforest implementation
  * Uses atomic compare-and-swap for thread-safety
  */
-__attribute__((always_inline)) inline
-static void link_vertices(const int32_t u, const int32_t v, int32_t* restrict parents)
-{
+__attribute__((always_inline)) inline static void link_vertices(const int32_t u, const int32_t v,
+                                                                int32_t *restrict parents) {
     /* Read parent values */
     int32_t p1 = parents[u];
     int32_t p2 = parents[v];
 
-    while (p1 != p2)
-    {
+    while (p1 != p2) {
         const int32_t high = (p1 > p2) ? p1 : p2;
         const int32_t low = (p1 < p2) ? p1 : p2;
         const int32_t p_high = parents[high];
         int32_t expected = high;
 
         if ((p_high == low) || // Was already 'low'
-            (p_high == high && (__atomic_compare_exchange_n( // Succeeded on writing 'low'
-                &parents[high], &expected, low, false,
-                __ATOMIC_SEQ_CST,
-                __ATOMIC_SEQ_CST))))
-        {
+            (p_high == high &&
+             (__atomic_compare_exchange_n( // Succeeded on writing 'low'
+                 &parents[high], &expected, low, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)))) {
             break;
         }
 
@@ -69,8 +65,7 @@ static void compress_cilk_recursive(int32_t *parents, const int32_t start, const
 /**
  * Helper structure for parallel max-finding
  */
-typedef struct
-{
+typedef struct {
     int32_t max_val;
     int32_t max_idx;
 } max_result_t;
@@ -79,28 +74,22 @@ typedef struct
  * Parallel divide-and-conquer max-finding
  * Uses cilk_spawn for recursive parallelism
  */
-static max_result_t find_max_range(const int32_t* array, const int32_t start, const int32_t end)
-{
+static max_result_t find_max_range(const int32_t *array, const int32_t start, const int32_t end) {
     const int32_t GRAIN_SIZE = 1024;
     max_result_t result;
 
-    if (end - start <= GRAIN_SIZE)
-    {
+    if (end - start <= GRAIN_SIZE) {
         /* Sequential base case */
         result.max_val = array[start];
         result.max_idx = start;
 
-        for (int32_t i = start + 1; i < end; i++)
-        {
-            if (array[i] > result.max_val)
-            {
+        for (int32_t i = start + 1; i < end; i++) {
+            if (array[i] > result.max_val) {
                 result.max_val = array[i];
                 result.max_idx = i;
             }
         }
-    }
-    else
-    {
+    } else {
         /* Parallel recursive case */
         const int32_t mid = start + (end - start) / 2;
 
@@ -118,18 +107,16 @@ static max_result_t find_max_range(const int32_t* array, const int32_t start, co
  * Parallel version of sample_frequent_element using Cilk
  * Uses cilk_for for parallel sampling and divide-and-conquer for max-finding
  */
-int32_t sample_frequent_element_cilk(const int32_t* comp, const int32_t num_vertices, const int32_t num_samples)
-{
-    if (comp == NULL || num_vertices <= 0 || num_samples <= 0)
-    {
+int32_t sample_frequent_element_cilk(const int32_t *comp, const int32_t num_vertices,
+                                     const int32_t num_samples) {
+    if (comp == NULL || num_vertices <= 0 || num_samples <= 0) {
         fprintf(stderr, "Error: Invalid parameters for sample_frequent_element\n");
         return -1;
     }
 
     /* Allocate counter array for tracking sample counts */
-    int32_t* sample_counts = calloc((size_t)num_vertices, sizeof(int32_t));
-    if (sample_counts == NULL)
-    {
+    int32_t *sample_counts = calloc((size_t)num_vertices, sizeof(int32_t));
+    if (sample_counts == NULL) {
         fprintf(stderr, "Error: Failed to allocate sample_counts array\n");
         return -1;
     }
@@ -137,8 +124,7 @@ int32_t sample_frequent_element_cilk(const int32_t* comp, const int32_t num_vert
     /* Parallel sampling phase using cilk_for */
     const unsigned int base_seed = (unsigned int)(time(NULL) ^ (time_t)(uintptr_t)comp);
 
-    cilk_for (int32_t i = 0; i < num_samples; i++)
-    {
+    cilk_for(int32_t i = 0; i < num_samples; i++) {
         /* Each iteration gets its own seed based on iteration number */
         unsigned int thread_seed = base_seed + (unsigned int)i;
         const int rand_val = rand_r(&thread_seed);
@@ -147,8 +133,7 @@ int32_t sample_frequent_element_cilk(const int32_t* comp, const int32_t num_vert
         const int32_t component_id = comp[idx];
 
         /* Bounds check to prevent heap corruption */
-        if (component_id >= 0 && component_id < num_vertices)
-        {
+        if (component_id >= 0 && component_id < num_vertices) {
             /* Atomic increment to avoid race conditions */
             __atomic_add_fetch(&sample_counts[component_id], 1, __ATOMIC_RELAXED);
         }
@@ -179,67 +164,58 @@ int32_t sample_frequent_element_cilk(const int32_t* comp, const int32_t num_vert
  * 4. Final linking: Process remaining neighbors
  * 5. Final compression: Compress all paths to roots
  */
-CCResult* afforest_cilk(const Graph* restrict g, int num_threads, int32_t neighbor_rounds)
-{
+CCResult *afforest_cilk(const Graph *restrict g, int num_threads, int32_t neighbor_rounds) {
     /* Check arguments */
-    if (g == NULL)
-    {
+    if (g == NULL) {
         fprintf(stderr, "Error: NULL graph pointer\n");
         return NULL;
     }
 
     const int32_t num_vertices = graph_get_num_vertices(g);
-    if (num_vertices <= 0)
-    {
+    if (num_vertices <= 0) {
         fprintf(stderr, "Error: Invalid number of vertices\n");
         return NULL;
     }
 
-    /* Note: num_threads parameter is ignored in Cilk - use CILK_NWORKERS environment variable instead */
+    /* Note: num_threads parameter is ignored in Cilk - use CILK_NWORKERS environment variable
+     * instead */
     (void)num_threads;
 
     /* Allocate result structure */
-    CCResult* restrict result = malloc(sizeof(CCResult));
-    if (result == NULL)
-    {
+    CCResult *restrict result = malloc(sizeof(CCResult));
+    if (result == NULL) {
         fprintf(stderr, "Error: Failed to allocate CCResult\n");
         return NULL;
     }
 
     /* Allocate aligned parent array (� in the algorithm) for better cache performance */
-    int32_t* parents = aligned_alloc(64, sizeof(int32_t) * (size_t)num_vertices);
-    if (parents == NULL)
-    {
+    int32_t *parents = aligned_alloc(64, sizeof(int32_t) * (size_t)num_vertices);
+    if (parents == NULL) {
         fprintf(stderr, "Error: Failed to allocate parent array\n");
         free(result);
         return NULL;
     }
 
     /* Phase 1: Initialize - each vertex is its own parent (�(v) � v) */
-    cilk_for (int32_t i = 0; i < num_vertices; i++)
-    {
+    cilk_for(int32_t i = 0; i < num_vertices; i++) {
         parents[i] = i;
     }
 
     /* Set default neighbor_rounds if needed */
-    if (neighbor_rounds <= 0)
-    {
+    if (neighbor_rounds <= 0) {
         neighbor_rounds = 2; // Default: sample first 2 neighbors
     }
 
     /* Phase 2: Neighbor rounds - process first k neighbors per vertex */
-    for (int32_t r = 0; r < neighbor_rounds; ++r)
-    {
+    for (int32_t r = 0; r < neighbor_rounds; ++r) {
         /* Parallel loop over all vertices */
-        cilk_for (int32_t u = 0; u < num_vertices; u++)
-        {
+        cilk_for(int32_t u = 0; u < num_vertices; u++) {
             const int32_t start = g->row_ptr[u];
             const int32_t end = g->row_ptr[u + 1];
             const int32_t num_neighbors = end - start;
 
             /* Process r-th neighbor if it exists */
-            if (r < num_neighbors)
-            {
+            if (r < num_neighbors) {
                 const int32_t v = g->col_idx[start + r];
                 link_vertices(u, v, parents);
             }
@@ -253,16 +229,15 @@ CCResult* afforest_cilk(const Graph* restrict g, int num_threads, int32_t neighb
 
     /* Phase 4: Final linking - process remaining neighbors */
     /* Skip vertices already in largest component for better load balancing */
-    cilk_for (int32_t u = 0; u < num_vertices; u++)
-    {
-        if (parents[u] == largest_component) continue;
+    cilk_for(int32_t u = 0; u < num_vertices; u++) {
+        if (parents[u] == largest_component)
+            continue;
 
         const int32_t start = g->row_ptr[u];
         const int32_t end = g->row_ptr[u + 1];
 
         /* Process remaining neighbors (after neighbor_rounds) */
-        for (int32_t j = start + neighbor_rounds; j < end; j++)
-        {
+        for (int32_t j = start + neighbor_rounds; j < end; j++) {
             const int32_t v = g->col_idx[j];
             link_vertices(u, v, parents);
         }
@@ -277,8 +252,7 @@ CCResult* afforest_cilk(const Graph* restrict g, int num_threads, int32_t neighb
 
     /* Count connected components */
     result->num_components = count_unique_labels(result->labels, num_vertices);
-    if (result->num_components < 0)
-    {
+    if (result->num_components < 0) {
         fprintf(stderr, "Error: Failed to count components\n");
         free(result->labels);
         free(result);
@@ -297,12 +271,8 @@ CCResult* afforest_cilk(const Graph* restrict g, int num_threads, int32_t neighb
  * Processes vertices directly from CSR format (no edge list conversion)
  * Uses edge reordering: only process edge (u,v) where u < v
  */
-static void process_vertices_recursive(
-    const Graph *g,
-    int32_t start,
-    int32_t end,
-    int32_t *parents
-) {
+static void process_vertices_recursive(const Graph *g, int32_t start, int32_t end,
+                                       int32_t *parents) {
     const int32_t GRAIN_SIZE = 512; // Vertices per sequential chunk
 
     if (end - start <= GRAIN_SIZE) {
@@ -313,7 +283,7 @@ static void process_vertices_recursive(
 
             for (int32_t j = row_start; j < row_end; j++) {
                 const int32_t v = g->col_idx[j];
-                if (u < v) {  /* Edge reordering: only process once */
+                if (u < v) { /* Edge reordering: only process once */
                     link_vertices(u, v, parents);
                 }
             }
@@ -334,7 +304,7 @@ static void process_vertices_recursive(
  */
 static void compress_recursive(int32_t *parents, int32_t start, int32_t end) {
     const int32_t GRAIN_SIZE = 32768; //
-    if (parents == NULL){
+    if (parents == NULL) {
         return;
     }
 
@@ -400,7 +370,7 @@ CCResult *recursive_edge_cc(const Graph *restrict g, int num_threads) {
     }
 
     /* Initialize: each vertex is its own parent */
-    cilk_for (int32_t i = 0; i < num_vertices; i++) {
+    cilk_for(int32_t i = 0; i < num_vertices; i++) {
         result->labels[i] = i;
     }
 

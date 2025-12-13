@@ -9,28 +9,28 @@
 
 /* Must define _GNU_SOURCE before any includes for CPU_SET/CPU_ZERO */
 #ifdef __linux__
-#define _GNU_SOURCE
-#define NUMA_AVAILABLE 1
+#    define _GNU_SOURCE
+#    define NUMA_AVAILABLE 1
 #else
-#define NUMA_AVAILABLE 0
+#    define NUMA_AVAILABLE 0
 #endif
 
 #include "afforest_simple.h"
 #include "cc_common.h"
 #include "graph.h"
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <stdint.h>
-#include <stdbool.h>
-#include <string.h>
-#include <time.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
 
 #if NUMA_AVAILABLE
-#include <sched.h>
-#include <unistd.h>
+#    include <sched.h>
+#    include <unistd.h>
 #endif
 
 /* Cache line size for alignment (prevent false sharing) */
@@ -48,7 +48,7 @@ typedef struct {
 /* Global synchronization primitives */
 typedef struct {
     pthread_barrier_t barrier;
-    void *(*work_func)(void*);
+    void *(*work_func)(void *);
     volatile bool should_exit;
 } thread_control_t;
 
@@ -105,10 +105,10 @@ typedef struct {
 
 /* Simple hash set for storing unique labels */
 typedef struct {
-    int32_t *keys;      /* Array of label values */
-    bool *occupied;     /* Which slots are occupied */
-    int32_t capacity;   /* Size of the hash table */
-    int32_t size;       /* Number of elements stored */
+    int32_t *keys;    /* Array of label values */
+    bool *occupied;   /* Which slots are occupied */
+    int32_t capacity; /* Size of the hash table */
+    int32_t size;     /* Number of elements stored */
 } HashSet;
 
 typedef struct {
@@ -118,7 +118,7 @@ typedef struct {
     int32_t num_vertices;
     int32_t start_idx;
     int32_t end_idx;
-    HashSet *local_set;  /* Each thread's private hash set */
+    HashSet *local_set; /* Each thread's private hash set */
 } __attribute__((aligned(CACHE_LINE_SIZE))) count_labels_args_t;
 
 typedef struct {
@@ -128,8 +128,8 @@ typedef struct {
     int32_t *parents;
     int32_t num_vertices;
     int32_t round;
-    work_counter_t *work_counter;  /* For dynamic scheduling */
-    bool use_dynamic;              /* Enable dynamic load balancing */
+    work_counter_t *work_counter; /* For dynamic scheduling */
+    bool use_dynamic;             /* Enable dynamic load balancing */
 } __attribute__((aligned(CACHE_LINE_SIZE))) neighbor_round_args_t;
 
 typedef struct {
@@ -142,8 +142,8 @@ typedef struct {
     int32_t largest_component;
     int32_t start_idx;
     int32_t end_idx;
-    work_counter_t *work_counter;  /* For dynamic scheduling */
-    bool use_dynamic;              /* Enable dynamic load balancing */
+    work_counter_t *work_counter; /* For dynamic scheduling */
+    bool use_dynamic;             /* Enable dynamic load balancing */
 } __attribute__((aligned(CACHE_LINE_SIZE))) final_phase_args_t;
 
 typedef struct {
@@ -169,7 +169,7 @@ static void pin_thread_to_core(int core_id) {
         fprintf(stderr, "Warning: Failed to pin thread to core %d\n", core_id);
     }
 #else
-    (void)core_id;  /* Suppress unused parameter warning */
+    (void)core_id; /* Suppress unused parameter warning */
 #endif
 }
 
@@ -180,7 +180,7 @@ static int get_num_cores(void) {
 #if NUMA_AVAILABLE
     return (int)sysconf(_SC_NPROCESSORS_ONLN);
 #else
-    return 16;  /* Default fallback */
+    return 16;     /* Default fallback */
 #endif
 }
 
@@ -188,8 +188,8 @@ static int get_num_cores(void) {
  * Link two vertices u and v using union-find with path compression
  * Based on the Link function from the GAP Benchmark Suite Afforest implementation
  */
-__attribute__((always_inline)) inline
-static void link_vertices(const int32_t u, const int32_t v, int32_t *restrict parents) {
+__attribute__((always_inline)) inline static void link_vertices(const int32_t u, const int32_t v,
+                                                                int32_t *restrict parents) {
     /* Read parent values */
     int32_t p1 = parents[u];
     int32_t p2 = parents[v];
@@ -201,10 +201,9 @@ static void link_vertices(const int32_t u, const int32_t v, int32_t *restrict pa
         int32_t expected = high;
 
         if ((p_high == low) || // Was already 'low'
-            (p_high == high && (__atomic_compare_exchange_n( // Succeeded on writing 'low'
-                 &parents[high], &expected, low, false,
-                 __ATOMIC_SEQ_CST,
-                 __ATOMIC_SEQ_CST)))) {
+            (p_high == high &&
+             (__atomic_compare_exchange_n( // Succeeded on writing 'low'
+                 &parents[high], &expected, low, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)))) {
             break;
         }
 
@@ -249,7 +248,7 @@ static void *compress_thread(void *arg) {
 
 /* Optimized compress - reuses thread handles */
 static void compress_with_threads(int32_t *restrict parents, int32_t num_vertices,
-                                    pthread_t *threads, compress_args_t *args, int num_threads) {
+                                  pthread_t *threads, compress_args_t *args, int num_threads) {
     /* Distribute work evenly across threads */
     const int32_t verts_per_thread = num_vertices / num_threads;
 
@@ -356,9 +355,10 @@ static void *maxfind_thread(void *arg) {
 /**
  * Create a hash set with given capacity
  */
-static HashSet* hashset_create(int32_t capacity) {
+static HashSet *hashset_create(int32_t capacity) {
     HashSet *set = malloc(sizeof(HashSet));
-    if (set == NULL) return NULL;
+    if (set == NULL)
+        return NULL;
 
     set->capacity = capacity;
     set->size = 0;
@@ -380,14 +380,14 @@ static HashSet* hashset_create(int32_t capacity) {
  */
 static bool hashset_insert(HashSet *set, int32_t key) {
     /* Simple hash function */
-    uint32_t hash = (uint32_t)key * 2654435761U;  /* Knuth's multiplicative hash */
+    uint32_t hash = (uint32_t)key * 2654435761U; /* Knuth's multiplicative hash */
     int32_t idx = (int32_t)(hash % (uint32_t)set->capacity);
 
     /* Linear probing */
     int32_t start_idx = idx;
     while (set->occupied[idx]) {
         if (set->keys[idx] == key) {
-            return false;  /* Already exists */
+            return false; /* Already exists */
         }
         idx = (idx + 1) % set->capacity;
         if (idx == start_idx) {
@@ -407,7 +407,8 @@ static bool hashset_insert(HashSet *set, int32_t key) {
  * Free a hash set
  */
 static void hashset_destroy(HashSet *set) {
-    if (set == NULL) return;
+    if (set == NULL)
+        return;
     free(set->keys);
     free(set->occupied);
     free(set);
@@ -438,13 +439,14 @@ static void *count_labels_thread(void *arg) {
  * Fast parallel unique label counting with thread-local hash sets
  */
 static int32_t count_unique_labels_parallel(const int32_t *labels, int32_t num_vertices,
-                                             pthread_t *threads, count_labels_args_t *args, int num_threads) {
+                                            pthread_t *threads, count_labels_args_t *args,
+                                            int num_threads) {
 
     /* Conservative estimate: allocate enough for all possible unique labels per thread
        Worst case: each thread sees different labels (num_vertices / num_threads)
        Use 5x capacity for low load factor and fast insertion */
     const int32_t max_labels_per_thread = num_vertices / num_threads;
-    const int32_t set_capacity = max_labels_per_thread * 5;  /* Load factor ~0.2 */
+    const int32_t set_capacity = max_labels_per_thread * 5; /* Load factor ~0.2 */
 
     /* Step 1: Each thread creates its own hash set */
     for (int i = 0; i < num_threads; i++) {
@@ -518,7 +520,7 @@ static int32_t count_unique_labels_parallel(const int32_t *labels, int32_t num_v
  * Parallel version of sample_frequent_element using pthreads
  */
 static int32_t sample_frequent_element(const int32_t *comp, const int32_t num_vertices,
-                                 const int32_t num_samples, int num_threads) {
+                                       const int32_t num_samples, int num_threads) {
     if (comp == NULL || num_vertices <= 0 || num_samples <= 0) {
         fprintf(stderr, "Error: Invalid parameters for sample_frequent_element\n");
         return -1;
@@ -626,13 +628,13 @@ static void *neighbor_round_thread(void *arg) {
             /* Atomically grab next chunk */
             const int32_t chunk_id = atomic_fetch_add(&args->work_counter->next_chunk, 1);
 
-            if (chunk_id >= num_chunks) break;  /* No more work */
+            if (chunk_id >= num_chunks)
+                break; /* No more work */
 
             /* Calculate chunk boundaries */
             const int32_t start = chunk_id * chunk_size;
-            const int32_t end = (start + chunk_size > args->num_vertices)
-                                ? args->num_vertices
-                                : start + chunk_size;
+            const int32_t end =
+                (start + chunk_size > args->num_vertices) ? args->num_vertices : start + chunk_size;
 
             /* Process this chunk */
             for (int32_t u = start; u < end; u++) {
@@ -688,17 +690,18 @@ static void *final_phase_thread(void *arg) {
             /* Atomically grab next chunk */
             const int32_t chunk_id = atomic_fetch_add(&args->work_counter->next_chunk, 1);
 
-            if (chunk_id >= num_chunks) break;  /* No more work */
+            if (chunk_id >= num_chunks)
+                break; /* No more work */
 
             /* Calculate chunk boundaries */
             const int32_t start = chunk_id * chunk_size;
-            const int32_t end = (start + chunk_size > args->num_vertices)
-                                ? args->num_vertices
-                                : start + chunk_size;
+            const int32_t end =
+                (start + chunk_size > args->num_vertices) ? args->num_vertices : start + chunk_size;
 
             /* Process this chunk */
             for (int32_t u = start; u < end; u++) {
-                if (args->parents[u] == args->largest_component) continue;
+                if (args->parents[u] == args->largest_component)
+                    continue;
 
                 int32_t num_neighbors = 0;
                 const int32_t *neighbors = graph_get_neighbors(args->g, u, &num_neighbors);
@@ -715,7 +718,8 @@ static void *final_phase_thread(void *arg) {
     } else {
         /* === STATIC SCHEDULING === */
         for (int32_t u = args->start_idx; u < args->end_idx; u++) {
-            if (args->parents[u] == args->largest_component) continue;
+            if (args->parents[u] == args->largest_component)
+                continue;
 
             int32_t num_neighbors = 0;
             const int32_t *neighbors = graph_get_neighbors(args->g, u, &num_neighbors);
@@ -733,7 +737,8 @@ static void *final_phase_thread(void *arg) {
     return NULL;
 }
 
-CCResult *afforest_simple_pthreads(const Graph *restrict g, int32_t num_threads, int32_t neighbor_rounds, bool use_dynamic) {
+CCResult *afforest_simple_pthreads(const Graph *restrict g, int32_t num_threads,
+                                   int32_t neighbor_rounds, bool use_dynamic) {
     /* Check arguments */
     if (g == NULL) {
         fprintf(stderr, "Error: NULL graph pointer\n");
@@ -754,7 +759,7 @@ CCResult *afforest_simple_pthreads(const Graph *restrict g, int32_t num_threads,
     }
 
     /* Allocate aligned parent array (π in the algorithm) for better cache performance */
-    int32_t *parents = aligned_alloc(64, sizeof(int32_t) * (size_t) num_vertices);
+    int32_t *parents = aligned_alloc(64, sizeof(int32_t) * (size_t)num_vertices);
 
     if (parents == NULL) {
         fprintf(stderr, "Error: Failed to allocate parent array\n");
@@ -769,12 +774,13 @@ CCResult *afforest_simple_pthreads(const Graph *restrict g, int32_t num_threads,
 
     pthread_t *threads = malloc(sizeof(pthread_t) * (size_t)num_threads);
     init_args_t *init_args = malloc(sizeof(init_args_t) * (size_t)num_threads);
-    neighbor_round_args_t *neighbor_args = malloc(sizeof(neighbor_round_args_t) * (size_t)num_threads);
+    neighbor_round_args_t *neighbor_args =
+        malloc(sizeof(neighbor_round_args_t) * (size_t)num_threads);
     compress_args_t *compress_args = malloc(sizeof(compress_args_t) * (size_t)num_threads);
     final_phase_args_t *final_args = malloc(sizeof(final_phase_args_t) * (size_t)num_threads);
 
-    if (threads == NULL || init_args == NULL || neighbor_args == NULL ||
-        compress_args == NULL || final_args == NULL) {
+    if (threads == NULL || init_args == NULL || neighbor_args == NULL || compress_args == NULL ||
+        final_args == NULL) {
         fprintf(stderr, "Error: Failed to allocate thread resources\n");
         free(parents);
         free(result);
@@ -810,10 +816,8 @@ CCResult *afforest_simple_pthreads(const Graph *restrict g, int32_t num_threads,
         }
     }
 
-    printf("Using %s scheduling (chunk size: %d)\n",
-           use_dynamic ? "DYNAMIC" : "STATIC",
+    printf("Using %s scheduling (chunk size: %d)\n", use_dynamic ? "DYNAMIC" : "STATIC",
            use_dynamic ? DYNAMIC_CHUNK_SIZE : 0);
-
 
     for (int i = 0; i < num_threads; i++) {
         const int32_t verts_per_thread = num_vertices / num_threads;
@@ -863,7 +867,8 @@ CCResult *afforest_simple_pthreads(const Graph *restrict g, int32_t num_threads,
     }
 
     /* === PHASE 3: Identify largest component === */
-    const int32_t largest_component = sample_frequent_element(parents, num_vertices, 1024, num_threads);
+    const int32_t largest_component =
+        sample_frequent_element(parents, num_vertices, 1024, num_threads);
 
     /* === PHASE 4: Final linking phase === */
 
@@ -895,7 +900,6 @@ CCResult *afforest_simple_pthreads(const Graph *restrict g, int32_t num_threads,
     for (int i = 0; i < num_threads; i++) {
         pthread_join(threads[i], NULL);
     }
-
 
     /* === PHASE 5: Final compression === */
     compress_with_threads(parents, num_vertices, threads, compress_args, num_threads);

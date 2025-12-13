@@ -1,17 +1,17 @@
 #include "graph.h"
-#include <stdlib.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define INITIAL_CAPACITY 4
 
-Graph* graph_create(const int32_t num_vertices) {
+Graph *graph_create(const int32_t num_vertices) {
     if (num_vertices <= 0) {
         fprintf(stderr, "Error: Invalid number of vertices\n");
         return NULL;
     }
 
-    Graph *g = (Graph *) malloc(sizeof(Graph));
+    Graph *g = (Graph *)malloc(sizeof(Graph));
     if (g == NULL) {
         fprintf(stderr, "Error: Failed to allocate memory for graph\n");
         return NULL;
@@ -26,9 +26,9 @@ Graph* graph_create(const int32_t num_vertices) {
     g->col_idx = NULL;
 
     /* Allocate temporary storage for adjacency lists */
-    g->adj_lists = (int32_t**)calloc((size_t)num_vertices, sizeof(int32_t*));
-    g->degrees = (int32_t*)calloc((size_t)num_vertices, sizeof(int32_t));
-    g->capacities = (int32_t*)calloc((size_t)num_vertices, sizeof(int32_t));
+    g->adj_lists = (int32_t **)calloc((size_t)num_vertices, sizeof(int32_t *));
+    g->degrees = (int32_t *)calloc((size_t)num_vertices, sizeof(int32_t));
+    g->capacities = (int32_t *)calloc((size_t)num_vertices, sizeof(int32_t));
 
     if ((g->adj_lists == NULL) || (g->degrees == NULL) || (g->capacities == NULL)) {
         fprintf(stderr, "Error: Failed to allocate memory for adjacency lists\n");
@@ -38,7 +38,7 @@ Graph* graph_create(const int32_t num_vertices) {
 
     /* Initialize each adjacency list with small capacity */
     for (int32_t i = 0; i < num_vertices; i++) {
-        g->adj_lists[i] = (int32_t*)malloc(INITIAL_CAPACITY * sizeof(int32_t));
+        g->adj_lists[i] = (int32_t *)malloc(INITIAL_CAPACITY * sizeof(int32_t));
         if (g->adj_lists[i] == NULL) {
             fprintf(stderr, "Error: Failed to allocate adjacency list\n");
             graph_destroy(g);
@@ -51,7 +51,7 @@ Graph* graph_create(const int32_t num_vertices) {
     return g;
 }
 
-int32_t graph_add_edge(Graph* g, const int32_t u, const int32_t v) {
+int32_t graph_add_edge(Graph *g, const int32_t u, const int32_t v) {
     if (g == NULL) {
         fprintf(stderr, "Error: NULL graph pointer\n");
         return -1;
@@ -76,8 +76,8 @@ int32_t graph_add_edge(Graph* g, const int32_t u, const int32_t v) {
     if (g->degrees[u] >= g->capacities[u]) {
         /* Resize the adjacency list */
         g->capacities[u] *= 2;
-        int32_t* temp = (int32_t*)realloc(g->adj_lists[u],
-                                          (size_t)g->capacities[u] * sizeof(int32_t));
+        int32_t *temp =
+            (int32_t *)realloc(g->adj_lists[u], (size_t)g->capacities[u] * sizeof(int32_t));
         if (temp == NULL) {
             fprintf(stderr, "Error: Failed to resize adjacency list\n");
             return -1;
@@ -90,8 +90,8 @@ int32_t graph_add_edge(Graph* g, const int32_t u, const int32_t v) {
     /* Add u to v's adjacency list (undirected graph) */
     if (g->degrees[v] >= g->capacities[v]) {
         g->capacities[v] *= 2;
-        int32_t* temp = (int32_t*)realloc(g->adj_lists[v],
-                                          (size_t)g->capacities[v] * sizeof(int32_t));
+        int32_t *temp =
+            (int32_t *)realloc(g->adj_lists[v], (size_t)g->capacities[v] * sizeof(int32_t));
         if (temp == NULL) {
             fprintf(stderr, "Error: Failed to resize adjacency list\n");
             return -1;
@@ -105,7 +105,7 @@ int32_t graph_add_edge(Graph* g, const int32_t u, const int32_t v) {
     return 0;
 }
 
-int32_t graph_finalize(Graph* g) {
+int32_t graph_finalize(Graph *g) {
     if (g == NULL) {
         fprintf(stderr, "Error: NULL graph pointer\n");
         return -1;
@@ -116,8 +116,8 @@ int32_t graph_finalize(Graph* g) {
     }
 
     /* Allocate CSR arrays */
-    g->row_ptr = (int32_t*)malloc((size_t)(g->num_vertices + 1) * sizeof(int32_t));
-    g->col_idx = (int32_t*)malloc((size_t)(2 * g->num_edges) * sizeof(int32_t));
+    g->row_ptr = (int32_t *)malloc((size_t)(g->num_vertices + 1) * sizeof(int32_t));
+    g->col_idx = (int32_t *)malloc((size_t)(2 * g->num_edges) * sizeof(int32_t));
 
     if ((g->row_ptr == NULL) || (g->col_idx == NULL)) {
         fprintf(stderr, "Error: Failed to allocate CSR arrays\n");
@@ -137,8 +137,7 @@ int32_t graph_finalize(Graph* g) {
     /* Copy adjacency lists to col_idx */
     for (int32_t i = 0; i < g->num_vertices; i++) {
         const int32_t offset = g->row_ptr[i];
-        (void)memcpy(&g->col_idx[offset], g->adj_lists[i],
-                     (size_t)g->degrees[i] * sizeof(int32_t));
+        (void)memcpy(&g->col_idx[offset], g->adj_lists[i], (size_t)g->degrees[i] * sizeof(int32_t));
     }
 
     /* Free temporary storage */
@@ -157,7 +156,7 @@ int32_t graph_finalize(Graph* g) {
     return 0;
 }
 
-void graph_destroy(Graph* g) {
+void graph_destroy(Graph *g) {
     if (g == NULL) {
         return;
     }
@@ -181,21 +180,21 @@ void graph_destroy(Graph* g) {
     free(g);
 }
 
-int32_t graph_get_num_vertices(const Graph* g) {
+int32_t graph_get_num_vertices(const Graph *g) {
     if (g == NULL) {
         return -1;
     }
     return g->num_vertices;
 }
 
-int32_t graph_get_num_edges(const Graph* g) {
+int32_t graph_get_num_edges(const Graph *g) {
     if (g == NULL) {
         return -1;
     }
     return g->num_edges;
 }
 
-const int32_t* graph_get_neighbors(const Graph* g, int32_t v, int32_t* num_neighbors) {
+const int32_t *graph_get_neighbors(const Graph *g, int32_t v, int32_t *num_neighbors) {
     if (g == NULL) {
         fprintf(stderr, "Error: NULL graph pointer\n");
         return NULL;
@@ -220,7 +219,7 @@ const int32_t* graph_get_neighbors(const Graph* g, int32_t v, int32_t* num_neigh
     return &g->col_idx[g->row_ptr[v]];
 }
 
-void graph_print_stats(const Graph* g) {
+void graph_print_stats(const Graph *g) {
     if (g == NULL) {
         fprintf(stderr, "Error: NULL graph pointer\n");
         return;

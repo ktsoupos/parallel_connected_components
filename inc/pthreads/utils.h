@@ -1,13 +1,12 @@
 #pragma once
 
-#include <stdint.h>
 #include <stdbool.h>
+#include <stdint.h>
 
 /**
  * Check if a number is a power of 2
  */
-static inline bool is_power_of_two(int64_t x)
-{
+static inline bool is_power_of_two(int64_t x) {
     return (x > 0) && ((x & (x - 1)) == 0);
 }
 
@@ -16,8 +15,7 @@ static inline bool is_power_of_two(int64_t x)
  * If x is already a power of 2, returns x unchanged
  * Returns 1 for x <= 1
  */
-static inline int64_t next_power_of_two(int64_t x)
-{
+static inline int64_t next_power_of_two(int64_t x) {
     if (x <= 1) {
         return 1;
     }
@@ -44,8 +42,7 @@ static inline int64_t next_power_of_two(int64_t x)
 /**
  * 32-bit version for smaller values
  */
-static inline int32_t next_power_of_two_32(int32_t x)
-{
+static inline int32_t next_power_of_two_32(int32_t x) {
     if (x <= 1) {
         return 1;
     }

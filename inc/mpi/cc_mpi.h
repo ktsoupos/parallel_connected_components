@@ -1,0 +1,28 @@
+#pragma once
+#include <mpi.h>
+#include <stdint.h>
+
+#include "graph.h"
+
+typedef struct {
+    int32_t g_num_vertices;
+    int32_t g_num_edges;
+    int32_t l_num_vertices;
+    int32_t l_num_edges;
+    int32_t vertex_offset;
+    int32_t *local_row_ptr; // Size: l_num_vertices + 1
+    int32_t *local_col_idx; // Size: l_num_edges,  stores GLOBAL IDs
+    int rank;
+    int num_ranks;
+    MPI_Comm comm;
+} DistributedGraph;
+
+/**
+ * Partition and distribute graph across processes
+ *
+ * @param global_graph - Complete graph (only valid on rank 0, NULL on others)
+ * @param dist_graph - Output: allocated DistributedGraph
+ * @param comm - MPI communicator
+ * @return 0 on success, non-zero on error
+ */
+int partition_graph(const Graph *global_graph, DistributedGraph **dist_graph, MPI_Comm comm);

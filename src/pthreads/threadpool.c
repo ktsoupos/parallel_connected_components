@@ -1,5 +1,5 @@
 #ifdef __linux__
-#define _GNU_SOURCE
+#    define _GNU_SOURCE
 #endif
 
 #include "threadpool.h"
@@ -12,8 +12,8 @@
 #include <time.h>
 
 #ifdef __linux__
-#include <sched.h>
-#include <unistd.h>
+#    include <sched.h>
+#    include <unistd.h>
 #endif
 
 ThreadPool *threadpool_create(int32_t num_workers, int64_t deque_capacity) {
@@ -41,10 +41,10 @@ ThreadPool *threadpool_create(int32_t num_workers, int64_t deque_capacity) {
 #ifdef __linux__
     pool->num_numa_nodes = (int32_t)sysconf(_SC_NPROCESSORS_ONLN);
     pool->numa_available = true;
-#ifdef DEBUG
-    fprintf(stderr, "[CPU Affinity] %d cores detected, will pin %d workers\n",
-            pool->num_numa_nodes, num_workers);
-#endif
+#    ifdef DEBUG
+    fprintf(stderr, "[CPU Affinity] %d cores detected, will pin %d workers\n", pool->num_numa_nodes,
+            num_workers);
+#    endif
 #else
     pool->num_numa_nodes = 1;
     pool->numa_available = false;
@@ -78,11 +78,8 @@ void threadpool_start(ThreadPool *pool) {
         return;
     }
     for (int32_t i = 0; i < pool->num_workers; i++) {
-        const int res = pthread_create(
-            &pool->threads[i],
-            NULL,
-            worker_thread_func,
-            &pool->workers[i]);
+        const int res =
+            pthread_create(&pool->threads[i], NULL, worker_thread_func, &pool->workers[i]);
         if (res != 0) {
             fprintf(stderr, "Failed to create thread %d\n", i);
             // Handle error - maybe set shutdown flag?
@@ -127,7 +124,6 @@ void threadpool_wake_workers(ThreadPool *pool) {
     pthread_mutex_unlock(&pool->tasks_done_mutex);
 }
 
-
 void threadpool_shutdown(ThreadPool *pool) {
     atomic_store_explicit(&pool->shutdown, 1, memory_order_release);
 
@@ -138,7 +134,6 @@ void threadpool_shutdown(ThreadPool *pool) {
     for (int i = 0; i < pool->num_workers; i++)
         pthread_join(pool->threads[i], NULL);
 }
-
 
 void threadpool_destroy(ThreadPool *pool) {
     if (pool == NULL) {

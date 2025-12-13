@@ -1,7 +1,7 @@
 #pragma once
 
-#include "graph.h"
 #include "cc_sequential.h"
+#include "graph.h"
 #include <stdint.h>
 
 /**
@@ -24,4 +24,5 @@
  * @param use_dynamic: Enable chunk-based dynamic load balancing (true) or static scheduling (false)
  * @return CCResult with component labels and statistics, or NULL on error
  */
-CCResult* afforest_simple_pthreads(const Graph* g, int32_t num_threads, int32_t neighbor_rounds, bool use_dynamic);
+CCResult *afforest_simple_pthreads(const Graph *g, int32_t num_threads, int32_t neighbor_rounds,
+                                   bool use_dynamic);

@@ -1,24 +1,30 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <errno.h>
-#include <unistd.h>
+#include "benchmark.h"
 #include "graph.h"
 #include "mtx_reader.h"
-#include "benchmark.h"
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+#ifdef USE_MPI
+#    include <mpi.h>
+/* MPI headers will go here when you implement them */
+/* #include "mpi/cc_mpi.h" */
+#endif
 
 #ifdef _OPENMP
-#include "cc_openmp.h"
+#    include "cc_openmp.h"
 #endif
 
 #ifdef __cilk
-#include "benchmark_opencilk.h"
-#include <cilk/cilk.h>
+#    include "benchmark_opencilk.h"
+#    include <cilk/cilk.h>
 
 /**
  * Get number of Cilk workers from environment or return default
  */
 static int get_cilk_workers(void) {
-    const char* workers_env = getenv("CILK_NWORKERS");
+    const char *workers_env = getenv("CILK_NWORKERS");
     if (workers_env != NULL) {
         const int workers = atoi(workers_env);
         if (workers > 0) {
@@ -35,7 +41,7 @@ static int get_cilk_workers(void) {
  * Get number of threads for pthreads from environment or return default
  */
 static int get_num_threads(void) {
-    const char* threads_env = getenv("NUM_THREADS");
+    const char *threads_env = getenv("NUM_THREADS");
     if (threads_env != NULL) {
         const int threads = atoi(threads_env);
         if (threads > 0) {
@@ -68,10 +74,12 @@ int main(const int argc, char **argv) {
             return EXIT_FAILURE;
         }
 
-        report_interval = (int32_t) val;
+        report_interval = (int32_t)val;
     }
 
-#ifdef __cilk
+#ifdef USE_MPI
+    printf("=== Connected Components - MPI Distributed Memory Version ===\n\n");
+#elif defined(__cilk)
     printf("=== Connected Components - OpenCilk Parallel Version ===\n\n");
 #elif defined(_OPENMP)
     printf("=== Connected Components - OpenMP Parallel Version ===\n\n");
@@ -88,7 +96,36 @@ int main(const int argc, char **argv) {
         return EXIT_FAILURE;
     }
 
-#ifdef __cilk
+#ifdef USE_MPI
+    /* MPI implementation - for now, runs sequential as placeholder */
+    /* You will implement MPI-specific benchmarks here */
+    printf("Note: MPI implementation not yet complete.\n");
+    printf("Running sequential version as placeholder.\n");
+    printf("You will implement distributed Afforest in src/mpi/\n\n");
+
+    const int result = run_sequential_benchmarks(g);
+    if (result != 0) {
+        graph_destroy(g);
+        return EXIT_FAILURE;
+    }
+
+    /* When you implement MPI functions, replace above with:
+     * int rank, num_ranks;
+     * MPI_Init(&argc, &argv);
+     * MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+     * MPI_Comm_size(MPI_COMM_WORLD, &num_ranks);
+     *
+     * int32_t *parents = NULL;
+     * cc_mpi_afforest(g, num_threads, &parents);
+     *
+     * if (rank == 0) {
+     *     int32_t num_components = get_num_components_mpi(parents, g->num_vertices);
+     *     printf("Number of components: %d\n", num_components);
+     * }
+     * free(parents);
+     * MPI_Finalize();
+     */
+#elif defined(__cilk)
     /* Run OpenCilk parallel benchmarks */
     const int num_workers = get_cilk_workers();
     const int result = run_opencilk_benchmarks(g, num_workers);
