@@ -1,4 +1,5 @@
 #include "cc_mpi.h"
+#include "cc_common.h"
 
 #include <stdbool.h>
 #include <stdio.h>
@@ -29,142 +30,6 @@ typedef struct {
     int32_t total_recv; // Total items to receive
 } CommData;
 
-/* ============ REMOTE BUFFER MANAGEMENT ============ */
-
-/**
- * Estimate initial capacity for remote buffers based on graph structure
- */
-static int32_t estimate_remote_capacity(const DistributedGraph *dg, int32_t neighbor_rounds) {
-    if (dg->l_num_vertices == 0)
-        return 256;
-
-    // Average degree per vertex
-    int32_t avg_degree = dg->l_num_edges / dg->l_num_vertices;
-
-    // Estimate: (avg_degree * neighbor_rounds * probability_remote)
-    // probability_remote ≈ (num_ranks - 1) / num_ranks
-    int32_t estimated = (avg_degree * neighbor_rounds * (dg->num_ranks - 1)) / dg->num_ranks;
-
-    // Per-rank estimate (edges distributed across all ranks)
-    estimated = estimated / dg->num_ranks;
-
-    // Safety margin (2x) and bounds
-    estimated *= 2;
-    if (estimated < 256)
-        estimated = 256;
-    if (estimated > 65536)
-        estimated = 65536;
-
-    return estimated;
-}
-
-/**
- * Allocate array of RemoteBuffers (one per MPI rank)
- */
-static RemoteBuffer *alloc_remote_buffers(int num_ranks, int32_t initial_capacity) {
-    RemoteBuffer *buffers = calloc((size_t)num_ranks, sizeof(RemoteBuffer));
-    if (buffers == NULL) {
-        fprintf(stderr, "Error: Failed to allocate remote buffers\n");
-        return NULL;
-    }
-
-    for (int i = 0; i < num_ranks; i++) {
-        buffers[i].capacity = initial_capacity;
-        buffers[i].count = 0;
-        buffers[i].local_vertices = malloc(sizeof(int32_t) * (size_t)initial_capacity);
-        buffers[i].global_vertices = malloc(sizeof(int32_t) * (size_t)initial_capacity);
-        buffers[i].parent_values = malloc(sizeof(int32_t) * (size_t)initial_capacity);
-
-        if (buffers[i].local_vertices == NULL ||
-            buffers[i].global_vertices == NULL ||
-            buffers[i].parent_values == NULL) {
-            fprintf(stderr, "Error: Failed to allocate buffer arrays\n");
-            for (int j = 0; j < num_ranks; j++) {
-                free(buffers[j].local_vertices);
-                buffers[j].local_vertices = NULL;
-                free(buffers[j].global_vertices);
-                buffers[j].global_vertices = NULL;
-                free(buffers[j].parent_values);
-                buffers[j].parent_values = NULL;
-            }
-            free(buffers);
-            return NULL;
-        }
-    }
-
-    return buffers;
-}
-
-
-/* ============ COMMUNICATION DATA MANAGEMENT ============ */
-
-/**
- * Allocate CommData structure
- */
-static CommData *alloc_comm_data(int num_ranks) {
-    CommData *comm = malloc(sizeof(CommData));
-    if (comm == NULL) {
-        fprintf(stderr, "Error: Failed to allocate CommData\n");
-        return NULL;
-    }
-
-    comm->send_counts = calloc((size_t)num_ranks, sizeof(int32_t));
-    comm->recv_counts = calloc((size_t)num_ranks, sizeof(int32_t));
-    comm->send_displs = calloc((size_t)num_ranks, sizeof(int32_t));
-    comm->recv_displs = calloc((size_t)num_ranks, sizeof(int32_t));
-
-    if (comm->send_counts == NULL || comm->recv_counts == NULL ||
-        comm->send_displs == NULL || comm->recv_displs == NULL) {
-        fprintf(stderr, "Error: Failed to allocate CommData arrays\n");
-        free(comm->send_counts);
-        comm->send_counts = NULL;
-        free(comm->recv_counts);
-        comm->recv_counts = NULL;
-        free(comm->send_displs);
-        comm->send_displs = NULL;
-        free(comm->recv_displs);
-        comm->recv_displs = NULL;
-        free(comm);
-        return NULL;
-    }
-
-    comm->total_send = 0;
-    comm->total_recv = 0;
-
-    return comm;
-}
-
-/**
- * Prepare communication metadata from remote buffers
- */
-static CommData *prepare_comm_data(RemoteBuffer *buffers, int num_ranks, MPI_Comm mpi_comm) {
-    CommData *comm = alloc_comm_data(num_ranks);
-    if (comm == NULL)
-        return NULL;
-
-    // Fill send counts from buffer counts
-    for (int i = 0; i < num_ranks; i++) {
-        comm->send_counts[i] = buffers[i].count;
-    }
-
-    // Exchange counts with all processes
-    MPI_Alltoall(comm->send_counts, 1, MPI_INT32_T,
-                 comm->recv_counts, 1, MPI_INT32_T, mpi_comm);
-
-    // Calculate displacements and totals
-    comm->send_displs[0] = 0;
-    comm->recv_displs[0] = 0;
-
-    for (int i = 1; i < num_ranks; i++) {
-        comm->send_displs[i] = comm->send_displs[i - 1] + comm->send_counts[i - 1];
-        comm->recv_displs[i] = comm->recv_displs[i - 1] + comm->recv_counts[i - 1];
-    }
-
-    comm->total_send = comm->send_displs[num_ranks - 1] + comm->send_counts[num_ranks - 1];
-    comm->total_recv = comm->recv_displs[num_ranks - 1] + comm->recv_counts[num_ranks - 1];
-
-    return comm;
-}
 
 /* ============ GRAPH PARTITIONING ============ */
 
@@ -309,6 +174,207 @@ int partition_graph(const Graph *global_graph,
     }
 
     return 0;
+}
+
+/* ============ MPI LABEL PROPAGATION ============ */
+
+/**
+ * MPI Label Propagation for Connected Components
+ *
+ * Algorithm:
+ * 1. Each process maintains labels for its local vertices
+ * 2. Each iteration:
+ *    - Exchange all labels globally using MPI_Allgatherv
+ *    - For each local vertex, propagate minimum label from neighbors
+ *    - Check global convergence (no changes anywhere)
+ * 3. Continue until convergence
+ *
+ * @param dg - Distributed graph structure
+ * @return CCResult with component labels, or NULL on error
+ */
+CCResult *mpi_label_propagation(const DistributedGraph *dg) {
+    if (dg == NULL) {
+        fprintf(stderr, "Error: NULL DistributedGraph pointer\n");
+        return NULL;
+    }
+
+    const int rank = dg->rank;
+    const int num_ranks = dg->num_ranks;
+    const int32_t g_num_vertices = dg->g_num_vertices;
+    const int32_t l_num_vertices = dg->l_num_vertices;
+    const int32_t vertex_offset = dg->vertex_offset;
+
+    /* Allocate result structure */
+    CCResult *result = malloc(sizeof(CCResult));
+    if (result == NULL) {
+        fprintf(stderr, "Rank %d: Failed to allocate CCResult\n", rank);
+        return NULL;
+    }
+
+    /* Allocate global labels array (all processes need all labels) */
+    int32_t *global_labels = malloc(sizeof(int32_t) * (size_t)g_num_vertices);
+    if (global_labels == NULL) {
+        fprintf(stderr, "Rank %d: Failed to allocate global labels\n", rank);
+        free(result);
+        return NULL;
+    }
+
+    /* Allocate local labels array */
+    int32_t *local_labels = malloc(sizeof(int32_t) * (size_t)l_num_vertices);
+    if (local_labels == NULL) {
+        fprintf(stderr, "Rank %d: Failed to allocate local labels\n", rank);
+        free(global_labels);
+        free(result);
+        return NULL;
+    }
+
+    /* Initialize local labels: each vertex gets its global ID as initial label */
+    for (int32_t i = 0; i < l_num_vertices; i++) {
+        local_labels[i] = vertex_offset + i;
+    }
+
+    /* Prepare MPI_Allgatherv parameters */
+    int32_t *recvcounts = malloc(sizeof(int32_t) * (size_t)num_ranks);
+    int32_t *displs = malloc(sizeof(int32_t) * (size_t)num_ranks);
+    if (recvcounts == NULL || displs == NULL) {
+        fprintf(stderr, "Rank %d: Failed to allocate MPI communication arrays\n", rank);
+        free(local_labels);
+        free(global_labels);
+        free(recvcounts);
+        free(displs);
+        free(result);
+        return NULL;
+    }
+
+    /* Calculate vertex counts and displacements for each rank */
+    const int32_t verts_per_proc = g_num_vertices / num_ranks;
+    for (int i = 0; i < num_ranks; i++) {
+        displs[i] = i * verts_per_proc;
+        recvcounts[i] = (i == num_ranks - 1)
+                        ? (g_num_vertices - displs[i])
+                        : verts_per_proc;
+    }
+
+    /* Label propagation iterations */
+    result->num_iterations = 0;
+    bool global_changed = true;
+
+    while (global_changed) {
+        result->num_iterations++;
+
+        /* Exchange labels: gather all local labels to global_labels on all processes */
+        int mpi_result = MPI_Allgatherv(
+            local_labels,           /* Send buffer: local labels */
+            l_num_vertices,         /* Send count */
+            MPI_INT32_T,           /* Send type */
+            global_labels,          /* Receive buffer: all labels */
+            recvcounts,             /* Receive counts per rank */
+            displs,                 /* Displacements per rank */
+            MPI_INT32_T,           /* Receive type */
+            dg->comm                /* Communicator */
+        );
+
+        if (mpi_result != MPI_SUCCESS) {
+            fprintf(stderr, "Rank %d: MPI_Allgatherv failed at iteration %d\n",
+                    rank, result->num_iterations);
+            free(displs);
+            free(recvcounts);
+            free(local_labels);
+            free(global_labels);
+            free(result);
+            return NULL;
+        }
+
+        /* Propagate labels locally */
+        bool local_changed = false;
+
+        for (int32_t i = 0; i < l_num_vertices; i++) {
+            const int32_t global_v = vertex_offset + i;
+            int32_t min_label = global_labels[global_v];
+
+            /* Find minimum label among neighbors */
+            const int32_t edge_start = dg->local_row_ptr[i];
+            const int32_t edge_end = dg->local_row_ptr[i + 1];
+
+            for (int32_t e = edge_start; e < edge_end; e++) {
+                const int32_t neighbor = dg->local_col_idx[e];
+
+                /* Bounds check for safety */
+                if (neighbor < 0 || neighbor >= g_num_vertices) {
+                    fprintf(stderr, "Rank %d: Invalid neighbor %d for vertex %d\n",
+                            rank, neighbor, global_v);
+                    continue;
+                }
+
+                if (global_labels[neighbor] < min_label) {
+                    min_label = global_labels[neighbor];
+                }
+            }
+
+            /* Update if label changed */
+            if (min_label < local_labels[i]) {
+                local_labels[i] = min_label;
+                local_changed = true;
+            }
+        }
+
+        /* Check global convergence: any process has changes? */
+        int local_changed_int = local_changed ? 1 : 0;
+        int global_changed_int = 0;
+
+        mpi_result = MPI_Allreduce(
+            &local_changed_int,     /* Send buffer */
+            &global_changed_int,    /* Receive buffer */
+            1,                      /* Count */
+            MPI_INT,               /* Type */
+            MPI_LOR,               /* Logical OR operation */
+            dg->comm               /* Communicator */
+        );
+
+        if (mpi_result != MPI_SUCCESS) {
+            fprintf(stderr, "Rank %d: MPI_Allreduce failed at iteration %d\n",
+                    rank, result->num_iterations);
+            free(displs);
+            free(recvcounts);
+            free(local_labels);
+            free(global_labels);
+            free(result);
+            return NULL;
+        }
+
+        global_changed = (global_changed_int != 0);
+    }
+
+    /* Gather final labels on rank 0 */
+    MPI_Allgatherv(
+        local_labels,
+        l_num_vertices,
+        MPI_INT32_T,
+        global_labels,
+        recvcounts,
+        displs,
+        MPI_INT32_T,
+        dg->comm
+    );
+
+    /* Only rank 0 needs to return the full result */
+    if (rank == 0) {
+        result->labels = global_labels;
+
+        /* Count unique components */
+        result->num_components = count_unique_labels(global_labels, g_num_vertices);
+    } else {
+        result->labels = NULL;
+        result->num_components = 0;
+        free(global_labels);
+    }
+
+    /* Cleanup */
+    free(local_labels);
+    free(recvcounts);
+    free(displs);
+
+    return result;
 }
 
 

@@ -29,3 +29,11 @@ typedef struct {
  * @return 0 on success, non-zero on error
  */
 int partition_graph(const Graph *global_graph, DistributedGraph **dist_graph, MPI_Comm comm);
+
+/**
+ * MPI Label Propagation for Connected Components
+ *
+ * @param dg - Distributed graph structure
+ * @return CCResult with component labels (rank 0 only), or NULL on error
+ */
+CCResult *mpi_label_propagation(const DistributedGraph *dg);
