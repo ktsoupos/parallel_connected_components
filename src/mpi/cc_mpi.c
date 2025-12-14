@@ -307,9 +307,14 @@ int partition_graph(const Graph *global_graph, DistributedGraph **dist_graph, MP
 
     (*dist_graph)->l_num_edges = (*dist_graph)->local_row_ptr[l_num_vertices];
 
+    if (rank == 0) {
+        printf("Rank 0: Allocating %d edges for distribution\n", (*dist_graph)->l_num_edges);
+    }
+
     (*dist_graph)->local_col_idx = malloc(sizeof(int32_t) * (size_t)(*dist_graph)->l_num_edges);
     if ((*dist_graph)->local_col_idx == NULL) {
-        fprintf(stderr, "Error: Failed to allocate local col idx\n");
+        fprintf(stderr, "Rank %d: Failed to allocate local col idx (%d edges)\n",
+                rank, (*dist_graph)->l_num_edges);
         free((*dist_graph)->local_row_ptr);
         free(*dist_graph);
         free(sendcounts);
@@ -596,9 +601,9 @@ CCResult *afforest_mpi(const DistributedGraph *dist_graph, int32_t neighbor_roun
         return NULL;
     }
 
-    int32_t *parents = aligned_alloc(64, sizeof(int32_t) * (size_t)dist_graph->l_num_vertices);
+    int32_t *parents = malloc(sizeof(int32_t) * (size_t)dist_graph->l_num_vertices);
     if (parents == NULL) {
-        fprintf(stderr, "Error: aligned_alloc failed\n");
+        fprintf(stderr, "Error: malloc failed for parents array\n");
         return NULL;
     }
     for (int32_t i = 0; i < dist_graph->l_num_vertices; i++) {
@@ -666,8 +671,11 @@ CCResult *afforest_mpi(const DistributedGraph *dist_graph, int32_t neighbor_roun
                    dist_graph->vertex_offset, dist_graph->l_num_vertices);
 
     // Phase 3: Sample to identify largest component
-    #define NUM_SAMPLES 1024
+    // NOTE: Disabled to save memory - allocating g_num_vertices on each process is wasteful
+    #define NUM_SAMPLES 0
+    int32_t largest_component = -1;  // Skip largest component optimization
 
+    #if 0  // Disabled memory-intensive sampling
     int32_t *sample_counts = calloc((size_t)dist_graph->g_num_vertices, sizeof(int32_t));
     if (sample_counts == NULL) {
         fprintf(stderr, "Error: Failed to allocate sample counts\n");
@@ -716,6 +724,7 @@ CCResult *afforest_mpi(const DistributedGraph *dist_graph, int32_t neighbor_roun
         printf("Skipping largest component (ID: %d, %.1f%% of samples)\n",
                largest_component, percentage);
     }
+    #endif  // End of disabled sampling code
 
     // Phase 4: Final linking phase - process remaining neighbors
     RemoteBuffer *final_remote_bufs = alloc_remote_buffers(dist_graph->num_ranks, initial_capacity);
@@ -881,9 +890,9 @@ CCResult *shiloach_vishkin_mpi(const DistributedGraph *dist_graph) {
         return NULL;
     }
 
-    int32_t *parents = aligned_alloc(64, sizeof(int32_t) * (size_t)dist_graph->l_num_vertices);
+    int32_t *parents = malloc(sizeof(int32_t) * (size_t)dist_graph->l_num_vertices);
     if (parents == NULL) {
-        fprintf(stderr, "Error: aligned_alloc failed\n");
+        fprintf(stderr, "Error: malloc failed for parents array\n");
         return NULL;
     }
 
