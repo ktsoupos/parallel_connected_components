@@ -17,6 +17,20 @@ typedef struct {
     int rank;
     int num_ranks;
     MPI_Comm comm;
+
+    /* Ghost vertex communication data */
+    int32_t num_ghost_vertices;        // Number of ghost vertices (owned by others, needed locally)
+    int32_t *ghost_global_ids;         // Global IDs of ghost vertices
+    int32_t *ghost_to_owner;           // Which rank owns each ghost vertex
+    int32_t *ghost_labels;             // Labels for ghost vertices
+
+    /* Per-rank communication metadata */
+    int32_t *send_counts;              // Number of vertices to send to each rank
+    int32_t *recv_counts;              // Number of vertices to receive from each rank
+    int32_t *send_displs;              // Displacement for send buffer per rank
+    int32_t *recv_displs;              // Displacement for recv buffer per rank
+    int32_t **send_vertices;           // Local indices to send to each rank
+
     char buff[8];
 }  __attribute__((aligned(64))) DistributedGraph;
 
@@ -37,3 +51,16 @@ int partition_graph(const Graph *global_graph, DistributedGraph **dist_graph, MP
  * @return CCResult with component labels (rank 0 only), or NULL on error
  */
 CCResult *mpi_label_propagation(const DistributedGraph *dg);
+
+/**
+ * Optimized MPI Label Propagation with Ghost/Halo Exchange
+ *
+ * Uses:
+ * - Ghost vertex communication (only boundary vertices)
+ * - Asynchronous MPI (non-blocking send/recv)
+ * - Computation/communication overlap
+ *
+ * @param dg - Distributed graph structure with ghost metadata
+ * @return CCResult with component labels (rank 0 only), or NULL on error
+ */
+CCResult *mpi_label_propagation_optimized(const DistributedGraph *dg);

@@ -173,6 +173,199 @@ int partition_graph(const Graph *global_graph,
         dg->local_row_ptr[i] -= base;
     }
 
+    /* Build ghost vertex map for communication optimization */
+    /* First pass: identify unique ghost vertices */
+    bool *is_ghost = calloc((size_t)g_num_vertices, sizeof(bool));
+    if (!is_ghost) {
+        fprintf(stderr, "Rank %d: Failed to allocate is_ghost array\n", rank);
+        return -1;
+    }
+
+    /* Mark all remote neighbors as ghosts */
+    for (int32_t i = 0; i < l_num_vertices; i++) {
+        const int32_t edge_start = dg->local_row_ptr[i];
+        const int32_t edge_end = dg->local_row_ptr[i + 1];
+
+        for (int32_t e = edge_start; e < edge_end; e++) {
+            const int32_t neighbor = dg->local_col_idx[e];
+
+            /* Check if neighbor is outside local range */
+            if (neighbor < vertex_offset || neighbor >= vertex_offset + l_num_vertices) {
+                is_ghost[neighbor] = true;
+            }
+        }
+    }
+
+    /* Count ghost vertices */
+    dg->num_ghost_vertices = 0;
+    for (int32_t v = 0; v < g_num_vertices; v++) {
+        if (is_ghost[v]) {
+            dg->num_ghost_vertices++;
+        }
+    }
+
+    /* Allocate ghost arrays */
+    if (dg->num_ghost_vertices > 0) {
+        dg->ghost_global_ids = malloc(sizeof(int32_t) * (size_t)dg->num_ghost_vertices);
+        dg->ghost_to_owner = malloc(sizeof(int32_t) * (size_t)dg->num_ghost_vertices);
+        dg->ghost_labels = malloc(sizeof(int32_t) * (size_t)dg->num_ghost_vertices);
+
+        if (!dg->ghost_global_ids || !dg->ghost_to_owner || !dg->ghost_labels) {
+            fprintf(stderr, "Rank %d: Failed to allocate ghost arrays\n", rank);
+            free(is_ghost);
+            return -1;
+        }
+
+        /* Fill ghost arrays temporarily in global ID order */
+        int32_t ghost_idx = 0;
+        for (int32_t v = 0; v < g_num_vertices; v++) {
+            if (is_ghost[v]) {
+                dg->ghost_global_ids[ghost_idx] = v;
+                /* Determine owner rank */
+                int owner_rank = v / verts_per_proc;
+                if (owner_rank >= num_ranks) owner_rank = num_ranks - 1;
+                dg->ghost_to_owner[ghost_idx] = owner_rank;
+                ghost_idx++;
+            }
+        }
+
+        /* CRITICAL: Sort ghost vertices by owner rank for correct Alltoallv communication */
+        int32_t *temp_global_ids = malloc(sizeof(int32_t) * (size_t)dg->num_ghost_vertices);
+        int32_t *temp_owners = malloc(sizeof(int32_t) * (size_t)dg->num_ghost_vertices);
+        int32_t *rank_counts = calloc((size_t)num_ranks, sizeof(int32_t));
+        int32_t *rank_offsets = malloc(sizeof(int32_t) * (size_t)num_ranks);
+
+        if (!temp_global_ids || !temp_owners || !rank_counts || !rank_offsets) {
+            fprintf(stderr, "Rank %d: Failed to allocate temp sort arrays\n", rank);
+            free(temp_global_ids);
+            free(temp_owners);
+            free(rank_counts);
+            free(rank_offsets);
+            free(is_ghost);
+            return -1;
+        }
+
+        /* Count ghosts per rank */
+        for (int32_t i = 0; i < dg->num_ghost_vertices; i++) {
+            rank_counts[dg->ghost_to_owner[i]]++;
+        }
+
+        /* Calculate offsets */
+        rank_offsets[0] = 0;
+        for (int r = 1; r < num_ranks; r++) {
+            rank_offsets[r] = rank_offsets[r - 1] + rank_counts[r - 1];
+        }
+
+        /* Reset counts for reuse as current positions */
+        for (int r = 0; r < num_ranks; r++) {
+            rank_counts[r] = rank_offsets[r];
+        }
+
+        /* Reorder by owner rank */
+        for (int32_t i = 0; i < dg->num_ghost_vertices; i++) {
+            int owner = dg->ghost_to_owner[i];
+            int32_t pos = rank_counts[owner]++;
+            temp_global_ids[pos] = dg->ghost_global_ids[i];
+            temp_owners[pos] = owner;
+        }
+
+        /* Copy back sorted arrays */
+        for (int32_t i = 0; i < dg->num_ghost_vertices; i++) {
+            dg->ghost_global_ids[i] = temp_global_ids[i];
+            dg->ghost_to_owner[i] = temp_owners[i];
+        }
+
+        free(temp_global_ids);
+        free(temp_owners);
+        free(rank_counts);
+        free(rank_offsets);
+    } else {
+        dg->ghost_global_ids = NULL;
+        dg->ghost_to_owner = NULL;
+        dg->ghost_labels = NULL;
+    }
+
+    free(is_ghost);
+
+    /* Build send/receive communication metadata */
+    dg->send_counts = calloc((size_t)num_ranks, sizeof(int32_t));
+    dg->recv_counts = calloc((size_t)num_ranks, sizeof(int32_t));
+    dg->send_displs = calloc((size_t)num_ranks, sizeof(int32_t));
+    dg->recv_displs = calloc((size_t)num_ranks, sizeof(int32_t));
+    dg->send_vertices = calloc((size_t)num_ranks, sizeof(int32_t *));
+
+    if (!dg->send_counts || !dg->recv_counts || !dg->send_displs ||
+        !dg->recv_displs || !dg->send_vertices) {
+        fprintf(stderr, "Rank %d: Failed to allocate communication metadata\n", rank);
+        return -1;
+    }
+
+    /* Count how many ghost vertices we receive from each rank (now sorted by owner) */
+    for (int32_t i = 0; i < dg->num_ghost_vertices; i++) {
+        int owner = dg->ghost_to_owner[i];
+        dg->recv_counts[owner]++;
+    }
+
+    /* Exchange recv_counts to get send_counts (transpose) */
+    MPI_Alltoall(dg->recv_counts, 1, MPI_INT32_T,
+                 dg->send_counts, 1, MPI_INT32_T, comm);
+
+    /* Calculate displacements */
+    dg->send_displs[0] = 0;
+    dg->recv_displs[0] = 0;
+    for (int r = 1; r < num_ranks; r++) {
+        dg->send_displs[r] = dg->send_displs[r - 1] + dg->send_counts[r - 1];
+        dg->recv_displs[r] = dg->recv_displs[r - 1] + dg->recv_counts[r - 1];
+    }
+
+    /* Allocate send_vertices arrays for each rank */
+    for (int r = 0; r < num_ranks; r++) {
+        if (dg->send_counts[r] > 0) {
+            dg->send_vertices[r] = malloc(sizeof(int32_t) * (size_t)dg->send_counts[r]);
+            if (!dg->send_vertices[r]) {
+                fprintf(stderr, "Rank %d: Failed to allocate send_vertices[%d]\n", rank, r);
+                return -1;
+            }
+        } else {
+            dg->send_vertices[r] = NULL;
+        }
+    }
+
+    /* Exchange global IDs to determine which local vertices to send */
+    int32_t *recv_requests = NULL;
+    if (dg->num_ghost_vertices > 0) {
+        recv_requests = malloc(sizeof(int32_t) * (size_t)dg->num_ghost_vertices);
+        if (!recv_requests) {
+            fprintf(stderr, "Rank %d: Failed to allocate recv_requests\n", rank);
+            return -1;
+        }
+        for (int32_t i = 0; i < dg->num_ghost_vertices; i++) {
+            recv_requests[i] = dg->ghost_global_ids[i];
+        }
+    }
+
+    int32_t total_send = dg->send_displs[num_ranks - 1] + dg->send_counts[num_ranks - 1];
+    int32_t *send_requests = malloc(sizeof(int32_t) * (size_t)(total_send > 0 ? total_send : 1));
+    if (!send_requests) {
+        fprintf(stderr, "Rank %d: Failed to allocate send_requests\n", rank);
+        free(recv_requests);
+        return -1;
+    }
+
+    MPI_Alltoallv(recv_requests, dg->recv_counts, dg->recv_displs, MPI_INT32_T,
+                  send_requests, dg->send_counts, dg->send_displs, MPI_INT32_T, comm);
+
+    /* Convert global IDs to local indices */
+    for (int r = 0; r < num_ranks; r++) {
+        for (int32_t i = 0; i < dg->send_counts[r]; i++) {
+            int32_t global_id = send_requests[dg->send_displs[r] + i];
+            dg->send_vertices[r][i] = global_id - vertex_offset;
+        }
+    }
+
+    free(send_requests);
+    free(recv_requests);
+
     return 0;
 }
 
@@ -373,6 +566,484 @@ CCResult *mpi_label_propagation(const DistributedGraph *dg) {
     free(local_labels);
     free(recvcounts);
     free(displs);
+
+    return result;
+}
+
+/* ============ OPTIMIZED MPI LABEL PROPAGATION WITH GHOST EXCHANGE ============ */
+
+/**
+ * Asynchronous ghost label exchange
+ * Starts non-blocking send/receive operations for boundary vertices only
+ *
+ * @param dg - Distributed graph with ghost metadata
+ * @param local_labels - Local vertex labels
+ * @param requests - Output array for MPI_Request handles
+ * @param num_requests - Output number of active requests
+ * @param send_buffers_out - Output send buffers (must be freed after MPI_Waitall)
+ * @return 0 on success, -1 on error
+ */
+static int start_ghost_exchange(const DistributedGraph *dg,
+                                 const int32_t *local_labels,
+                                 MPI_Request **requests,
+                                 int *num_requests,
+                                 int32_t ***send_buffers_out) {
+    const int num_ranks = dg->num_ranks;
+    const int rank = dg->rank;
+
+    /* Count actual send and recv operations */
+    int num_sends = 0;
+    int num_recvs = 0;
+    for (int r = 0; r < num_ranks; r++) {
+        if (r != rank) {
+            if (dg->send_counts[r] > 0) num_sends++;
+            if (dg->recv_counts[r] > 0) num_recvs++;
+        }
+    }
+
+    *num_requests = num_sends + num_recvs;
+    if (*num_requests == 0) {
+        *requests = NULL;
+        *send_buffers_out = NULL;
+        return 0;
+    }
+
+    *requests = malloc(sizeof(MPI_Request) * (size_t)(*num_requests));
+    if (*requests == NULL) {
+        fprintf(stderr, "Rank %d: Failed to allocate request array\n", rank);
+        return -1;
+    }
+
+    /* Allocate send buffers (one per rank) */
+    int32_t **send_buffers = malloc(sizeof(int32_t *) * (size_t)num_ranks);
+    if (send_buffers == NULL) {
+        free(*requests);
+        *requests = NULL;
+        return -1;
+    }
+
+    for (int r = 0; r < num_ranks; r++) {
+        if (dg->send_counts[r] > 0 && r != rank) {
+            send_buffers[r] = malloc(sizeof(int32_t) * (size_t)dg->send_counts[r]);
+            if (send_buffers[r] == NULL) {
+                /* Cleanup on error */
+                for (int j = 0; j < r; j++) {
+                    free(send_buffers[j]);
+                }
+                free(send_buffers);
+                free(*requests);
+                *requests = NULL;
+                return -1;
+            }
+
+            /* Pack labels to send */
+            for (int32_t i = 0; i < dg->send_counts[r]; i++) {
+                int32_t local_idx = dg->send_vertices[r][i];
+                send_buffers[r][i] = local_labels[local_idx];
+            }
+        } else {
+            send_buffers[r] = NULL;
+        }
+    }
+
+    /* Start non-blocking send and receive operations */
+    int req_idx = 0;
+    for (int r = 0; r < num_ranks; r++) {
+        if (r == rank) continue;
+
+        /* Post receives */
+        if (dg->recv_counts[r] > 0) {
+            MPI_Irecv(
+                dg->ghost_labels + dg->recv_displs[r],
+                dg->recv_counts[r],
+                MPI_INT32_T,
+                r,
+                0, /* tag */
+                dg->comm,
+                &(*requests)[req_idx++]
+            );
+        }
+
+        /* Post sends */
+        if (dg->send_counts[r] > 0) {
+            MPI_Isend(
+                send_buffers[r],
+                dg->send_counts[r],
+                MPI_INT32_T,
+                r,
+                0, /* tag */
+                dg->comm,
+                &(*requests)[req_idx++]
+            );
+        }
+    }
+
+    /* Return send buffers so caller can free after MPI_Wait */
+    *send_buffers_out = send_buffers;
+
+    return 0;
+}
+
+/**
+ * Simple hash table for O(1) ghost vertex lookup
+ */
+typedef struct {
+    int32_t *keys;      /* Global vertex IDs */
+    int32_t *values;    /* Indices into ghost_labels */
+    int32_t *next;      /* Collision chain */
+    int32_t capacity;
+    int32_t num_entries;
+} GhostHashMap;
+
+static GhostHashMap *create_ghost_hashmap(const DistributedGraph *dg) {
+    GhostHashMap *map = malloc(sizeof(GhostHashMap));
+    if (!map) return NULL;
+
+    /* Use a hash table with capacity = 2 * num_ghosts for low collisions */
+    map->capacity = dg->num_ghost_vertices * 2 + 1;
+    if (map->capacity < 16) map->capacity = 16;
+
+    map->keys = malloc(sizeof(int32_t) * (size_t)map->capacity);
+    map->values = malloc(sizeof(int32_t) * (size_t)map->capacity);
+    map->next = malloc(sizeof(int32_t) * (size_t)map->capacity);
+
+    if (!map->keys || !map->values || !map->next) {
+        free(map->keys);
+        free(map->values);
+        free(map->next);
+        free(map);
+        return NULL;
+    }
+
+    /* Initialize to empty */
+    for (int32_t i = 0; i < map->capacity; i++) {
+        map->keys[i] = -1;
+        map->next[i] = -1;
+    }
+
+    /* Insert ghost vertices */
+    map->num_entries = 0;
+    for (int32_t i = 0; i < dg->num_ghost_vertices; i++) {
+        int32_t key = dg->ghost_global_ids[i];
+        int32_t hash = (key % map->capacity + map->capacity) % map->capacity;
+
+        /* Find insertion point */
+        if (map->keys[hash] == -1) {
+            /* Empty slot */
+            map->keys[hash] = key;
+            map->values[hash] = i;
+        } else {
+            /* Collision - find free slot and chain */
+            int32_t free_slot = (hash + 1) % map->capacity;
+            int32_t attempts = 0;
+            while (map->keys[free_slot] != -1) {
+                free_slot = (free_slot + 1) % map->capacity;
+                attempts++;
+                if (attempts >= map->capacity) {
+                    /* Hash map is full - should never happen */
+                    fprintf(stderr, "ERROR: Hash map full during insertion!\n");
+                    return NULL;
+                }
+            }
+            map->keys[free_slot] = key;
+            map->values[free_slot] = i;
+
+            /* Chain from hash position */
+            int32_t pos = hash;
+            attempts = 0;
+            while (map->next[pos] != -1) {
+                pos = map->next[pos];
+                attempts++;
+                if (attempts >= map->capacity) {
+                    /* Chain is circular - should never happen */
+                    fprintf(stderr, "ERROR: Circular chain detected!\n");
+                    return NULL;
+                }
+            }
+            map->next[pos] = free_slot;
+        }
+        map->num_entries++;
+    }
+
+    return map;
+}
+
+static inline int32_t ghost_hashmap_get(const GhostHashMap *map, int32_t key) {
+    int32_t hash = (key % map->capacity + map->capacity) % map->capacity;
+    int32_t pos = hash;
+
+    while (pos != -1) {
+        if (map->keys[pos] == key) {
+            return map->values[pos];
+        }
+        pos = map->next[pos];
+    }
+
+    return -1; /* Not found */
+}
+
+static void destroy_ghost_hashmap(GhostHashMap *map) {
+    if (map) {
+        free(map->keys);
+        free(map->values);
+        free(map->next);
+        free(map);
+    }
+}
+
+/**
+ * Get label for a vertex (local or ghost) - optimized with binary search
+ * Since ghost_global_ids is sorted, we can use binary search
+ */
+static inline int32_t get_vertex_label_fast(const DistributedGraph *dg,
+                                             const int32_t *local_labels,
+                                             const GhostHashMap *ghost_map,
+                                             int32_t global_vertex_id) {
+    const int32_t vertex_offset = dg->vertex_offset;
+    const int32_t l_num_vertices = dg->l_num_vertices;
+
+    /* Check if vertex is local */
+    if (global_vertex_id >= vertex_offset &&
+        global_vertex_id < vertex_offset + l_num_vertices) {
+        return local_labels[global_vertex_id - vertex_offset];
+    }
+
+    /* Binary search in sorted ghost_global_ids array */
+    int32_t left = 0;
+    int32_t right = dg->num_ghost_vertices - 1;
+
+    while (left <= right) {
+        int32_t mid = left + (right - left) / 2;
+        if (dg->ghost_global_ids[mid] == global_vertex_id) {
+            return dg->ghost_labels[mid];
+        } else if (dg->ghost_global_ids[mid] < global_vertex_id) {
+            left = mid + 1;
+        } else {
+            right = mid - 1;
+        }
+    }
+
+    /* Should never reach here if graph is correctly partitioned */
+    fprintf(stderr, "Error: Vertex %d not found in local or ghost\n", global_vertex_id);
+    return global_vertex_id; /* Fallback */
+}
+
+/**
+ * Optimized MPI Label Propagation with Ghost/Halo Exchange
+ *
+ * Optimizations:
+ * 1. Ghost exchange: Only communicate boundary vertices (not full graph)
+ * 2. Asynchronous communication: Non-blocking MPI_Isend/Irecv
+ * 3. Computation/communication overlap: Process interior vertices during communication
+ *
+ * @param dg - Distributed graph structure with ghost metadata
+ * @return CCResult with component labels (rank 0 only), or NULL on error
+ */
+CCResult *mpi_label_propagation_optimized(const DistributedGraph *dg) {
+    if (dg == NULL) {
+        fprintf(stderr, "Error: NULL DistributedGraph pointer\n");
+        return NULL;
+    }
+
+    const int rank = dg->rank;
+    const int num_ranks = dg->num_ranks;
+    const int32_t g_num_vertices = dg->g_num_vertices;
+    const int32_t l_num_vertices = dg->l_num_vertices;
+    const int32_t vertex_offset = dg->vertex_offset;
+
+    /* Allocate result structure */
+    CCResult *result = malloc(sizeof(CCResult));
+    if (result == NULL) {
+        fprintf(stderr, "Rank %d: Failed to allocate CCResult\n", rank);
+        return NULL;
+    }
+
+    /* Allocate local labels (only local vertices) */
+    int32_t *local_labels = malloc(sizeof(int32_t) * (size_t)l_num_vertices);
+    if (local_labels == NULL) {
+        fprintf(stderr, "Rank %d: Failed to allocate local labels\n", rank);
+        free(result);
+        return NULL;
+    }
+
+    /* Initialize labels: each vertex gets its global ID as initial label */
+    for (int32_t i = 0; i < l_num_vertices; i++) {
+        local_labels[i] = vertex_offset + i;
+    }
+
+    /* Initialize ghost labels */
+    for (int32_t i = 0; i < dg->num_ghost_vertices; i++) {
+        dg->ghost_labels[i] = dg->ghost_global_ids[i];
+    }
+
+    /* Identify boundary and interior vertices */
+    bool *is_boundary = calloc((size_t)l_num_vertices, sizeof(bool));
+    if (is_boundary == NULL) {
+        fprintf(stderr, "Rank %d: Failed to allocate is_boundary array\n", rank);
+        free(local_labels);
+        free(result);
+        return NULL;
+    }
+
+    for (int32_t i = 0; i < l_num_vertices; i++) {
+        const int32_t edge_start = dg->local_row_ptr[i];
+        const int32_t edge_end = dg->local_row_ptr[i + 1];
+
+        for (int32_t e = edge_start; e < edge_end; e++) {
+            const int32_t neighbor = dg->local_col_idx[e];
+            /* If any neighbor is remote, this is a boundary vertex */
+            if (neighbor < vertex_offset || neighbor >= vertex_offset + l_num_vertices) {
+                is_boundary[i] = true;
+                break;
+            }
+        }
+    }
+
+    /* No hash map needed - using binary search on sorted ghost_global_ids instead */
+    GhostHashMap *ghost_map = NULL; /* Kept for function signature compatibility */
+
+    /* Label propagation with async communication */
+    result->num_iterations = 0;
+    bool global_changed = true;
+
+    while (global_changed) {
+        result->num_iterations++;
+
+        /* Start asynchronous ghost exchange */
+        MPI_Request *requests = NULL;
+        int num_requests = 0;
+        int32_t **send_buffers = NULL;
+        if (start_ghost_exchange(dg, local_labels, &requests, &num_requests, &send_buffers) != 0) {
+            fprintf(stderr, "Rank %d: Ghost exchange failed\n", rank);
+            destroy_ghost_hashmap(ghost_map);
+            free(is_boundary);
+            free(local_labels);
+            free(result);
+            return NULL;
+        }
+
+        /* Phase 1: Process interior vertices while communication is in flight */
+        bool interior_changed = false;
+        for (int32_t i = 0; i < l_num_vertices; i++) {
+            if (is_boundary[i]) continue; /* Skip boundary, will process after communication */
+
+            int32_t min_label = local_labels[i];
+
+            const int32_t edge_start = dg->local_row_ptr[i];
+            const int32_t edge_end = dg->local_row_ptr[i + 1];
+
+            for (int32_t e = edge_start; e < edge_end; e++) {
+                const int32_t neighbor = dg->local_col_idx[e];
+                int32_t neighbor_label = local_labels[neighbor - vertex_offset]; /* All interior neighbors are local */
+
+                if (neighbor_label < min_label) {
+                    min_label = neighbor_label;
+                }
+            }
+
+            if (min_label < local_labels[i]) {
+                local_labels[i] = min_label;
+                interior_changed = true;
+            }
+        }
+
+        /* Wait for ghost exchange to complete */
+        if (num_requests > 0) {
+            MPI_Waitall(num_requests, requests, MPI_STATUSES_IGNORE);
+            free(requests);
+        }
+
+        /* Free send buffers now that MPI operations are complete */
+        if (send_buffers != NULL) {
+            for (int r = 0; r < num_ranks; r++) {
+                free(send_buffers[r]);
+            }
+            free(send_buffers);
+        }
+
+        /* Phase 2: Process boundary vertices (now have updated ghost labels) */
+        bool boundary_changed = false;
+        for (int32_t i = 0; i < l_num_vertices; i++) {
+            if (!is_boundary[i]) continue; /* Already processed interior */
+
+            int32_t min_label = local_labels[i];
+
+            const int32_t edge_start = dg->local_row_ptr[i];
+            const int32_t edge_end = dg->local_row_ptr[i + 1];
+
+            for (int32_t e = edge_start; e < edge_end; e++) {
+                const int32_t neighbor = dg->local_col_idx[e];
+                int32_t neighbor_label = get_vertex_label_fast(dg, local_labels, ghost_map, neighbor);
+
+                if (neighbor_label < min_label) {
+                    min_label = neighbor_label;
+                }
+            }
+
+            if (min_label < local_labels[i]) {
+                local_labels[i] = min_label;
+                boundary_changed = true;
+            }
+        }
+
+        /* Check global convergence */
+        bool local_changed = interior_changed || boundary_changed;
+        int local_changed_int = local_changed ? 1 : 0;
+        int global_changed_int = 0;
+
+        MPI_Allreduce(&local_changed_int, &global_changed_int, 1,
+                      MPI_INT, MPI_LOR, dg->comm);
+
+        global_changed = (global_changed_int != 0);
+    }
+
+    /* Gather final labels on all processes (for verification) */
+    int32_t *all_labels = NULL;
+    if (rank == 0) {
+        all_labels = malloc(sizeof(int32_t) * (size_t)g_num_vertices);
+        if (all_labels == NULL) {
+            fprintf(stderr, "Rank %d: Failed to allocate all_labels\n", rank);
+            free(is_boundary);
+            free(local_labels);
+            free(result);
+            return NULL;
+        }
+    }
+
+    /* Calculate gather parameters */
+    int32_t *recvcounts = NULL;
+    int32_t *displs = NULL;
+    if (rank == 0) {
+        recvcounts = malloc(sizeof(int32_t) * (size_t)num_ranks);
+        displs = malloc(sizeof(int32_t) * (size_t)num_ranks);
+
+        const int32_t verts_per_proc = g_num_vertices / num_ranks;
+        for (int r = 0; r < num_ranks; r++) {
+            displs[r] = r * verts_per_proc;
+            recvcounts[r] = (r == num_ranks - 1)
+                            ? (g_num_vertices - displs[r])
+                            : verts_per_proc;
+        }
+    }
+
+    MPI_Gatherv(local_labels, l_num_vertices, MPI_INT32_T,
+                all_labels, recvcounts, displs, MPI_INT32_T,
+                0, dg->comm);
+
+    /* Only rank 0 returns the full result */
+    if (rank == 0) {
+        result->labels = all_labels;
+        result->num_components = count_unique_labels(all_labels, g_num_vertices);
+        free(recvcounts);
+        free(displs);
+    } else {
+        result->labels = NULL;
+        result->num_components = 0;
+    }
+
+    /* Cleanup */
+    free(is_boundary);
+    free(local_labels);
 
     return result;
 }
