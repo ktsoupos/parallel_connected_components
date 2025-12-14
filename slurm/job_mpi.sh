@@ -19,8 +19,10 @@ echo "Number of tasks: $SLURM_NTASKS"
 # Navigate to project directory
 cd $SLURM_SUBMIT_DIR
 
-# Load MPI module
-module load openmpi/5.0.5
+# Load MPI module (must match build environment)
+module purge
+module load gcc
+module load openmpi
 
 # Configure MPI/UCX to avoid warnings and use shared memory
 export UCX_WARN_UNUSED_ENV_VARS=n
