@@ -258,7 +258,7 @@ int partition_graph(const Graph *global_graph, DistributedGraph **dist_graph, MP
         return -1;
     }
 
-    int *sendcounts = malloc(sizeof(int) * (size_t)num_ranks);
+    int32_t *sendcounts = malloc(sizeof(int32_t) * (size_t)num_ranks);
     if (sendcounts == NULL) {
         fprintf(stderr, "Error: Failed to allocate sendcounts\n");
         free((*dist_graph)->local_row_ptr);
@@ -266,7 +266,7 @@ int partition_graph(const Graph *global_graph, DistributedGraph **dist_graph, MP
         return -1;
     }
 
-    int *displs = malloc(sizeof(int) * (size_t)num_ranks);
+    int32_t *displs = malloc(sizeof(int32_t) * (size_t)num_ranks);
     if (displs == NULL) {
         fprintf(stderr, "Error: Failed to allocate displs\n");
         free(sendcounts);
@@ -277,8 +277,8 @@ int partition_graph(const Graph *global_graph, DistributedGraph **dist_graph, MP
 
     if (rank == 0) {
         for (int i = 0; i < num_ranks; i++) {
-            const int offset = i * verts_per_proc;
-            const int count = (i == num_ranks - 1)
+            const int32_t offset = i * verts_per_proc;
+            const int32_t count = (i == num_ranks - 1)
                                   ? (g_num_vertices - offset + 1)
                                   : (verts_per_proc + 1);
             sendcounts[i] = count;
@@ -320,13 +320,13 @@ int partition_graph(const Graph *global_graph, DistributedGraph **dist_graph, MP
     // On rank 0: calculate edge counts and offsets for each process
     if (rank == 0) {
         for (int i = 0; i < num_ranks; i++) {
-            const int v_offset = i * verts_per_proc;
-            const int v_count = (i == num_ranks - 1)
+            const int32_t v_offset = i * verts_per_proc;
+            const int32_t v_count = (i == num_ranks - 1)
                                     ? (g_num_vertices - v_offset)
                                     : verts_per_proc;
 
-            const int edge_start = global_graph->row_ptr[v_offset];
-            const int edge_end = global_graph->row_ptr[v_offset + v_count];
+            const int32_t edge_start = global_graph->row_ptr[v_offset];
+            const int32_t edge_end = global_graph->row_ptr[v_offset + v_count];
 
             sendcounts[i] = edge_end - edge_start;
             displs[i] = edge_start;
