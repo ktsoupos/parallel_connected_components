@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=cc_mpi
 #SBATCH --partition=batch
-#SBATCH --time=1:00:00
+#SBATCH --time=0:10:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=8
 #SBATCH --cpus-per-task=1
@@ -35,7 +35,7 @@ for procs in 2 4 8; do
     echo "========================================="
 
     echo "MPI Shiloach-Vishkin algorithm:"
-    srun -n $procs ./build/cc_mpi data/medium_graph.mtx 10000
+    srun -n $procs ./build/cc_mpi data/test_small.mtx 0
 
 done
 
