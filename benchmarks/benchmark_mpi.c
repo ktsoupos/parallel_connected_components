@@ -62,8 +62,7 @@ int run_mpi_benchmarks(const Graph *g) {
     }
 
     const double start_sv = MPI_Wtime();
-
-    CCResult *result_sv = shiloach_vishkin_mpi(dist_graph);
+    CCResult *result_sv = NULL;
     const double end_sv = MPI_Wtime();
 
     if (result_sv == NULL) {

@@ -29,19 +29,3 @@ typedef struct {
  * @return 0 on success, non-zero on error
  */
 int partition_graph(const Graph *global_graph, DistributedGraph **dist_graph, MPI_Comm comm);
-
-
-CCResult *afforest_mpi(const DistributedGraph *dist_graph, int32_t neighbor_rounds);
-
-/**
- * Hybrid Shiloach-Vishkin Algorithm with Local Union-Find
- *
- * Three-phase approach optimized for distributed systems:
- * 1. Local union-find within partition (no communication)
- * 2. Shiloach-Vishkin hooking/jumping for boundary vertices
- * 3. Global label propagation to finalize components
- *
- * @param dist_graph - Distributed graph structure
- * @return CCResult with component labels and statistics
- */
-CCResult* shiloach_vishkin_mpi(const DistributedGraph *dist_graph);
