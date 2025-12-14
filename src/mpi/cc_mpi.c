@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#include <unistd.h>
 
 /**
  * Buffer for organizing remote edge requests to a specific process
@@ -201,161 +202,177 @@ static CommData *prepare_comm_data(RemoteBuffer *buffers, int num_ranks, MPI_Com
 
 /* ============ GRAPH PARTITIONING ============ */
 
-int partition_graph(const Graph *global_graph, DistributedGraph **dist_graph, MPI_Comm comm) {
-    if (dist_graph == NULL) {
-        fprintf(stderr, "Error: NULL dist_graph pointer\n");
-        return -1;
-    }
-
+int partition_graph(const Graph *global_graph,
+                    DistributedGraph **dist_graph,
+                    MPI_Comm comm) {
     int rank, num_ranks;
     MPI_Comm_rank(comm, &rank);
     MPI_Comm_size(comm, &num_ranks);
 
-    // Only rank 0 should have a valid global_graph
-    if (rank == 0 && global_graph == NULL) {
-        fprintf(stderr, "Error: NULL global_graph pointer on rank 0\n");
-        return -1;
-    }
+    /* -------------------------------------------------- */
+    /* 1. Broadcast global metadata                       */
+    /* -------------------------------------------------- */
 
-    int32_t metadata[2] = {0, 0};
+    int32_t meta[2] = {0, 0};
     if (rank == 0) {
-        metadata[0] = global_graph->num_vertices;
-        metadata[1] = global_graph->num_edges;
-
+        meta[0] = global_graph->num_vertices;
+        meta[1] = global_graph->num_edges;
     }
-    MPI_Bcast(metadata, 2, MPI_INT32_T, 0, comm);
-    const int32_t g_num_vertices = metadata[0];
-    const int32_t g_num_edges = metadata[1];
+
+    MPI_Bcast(meta, 2, MPI_INT32_T, 0, comm);
+
+    const int32_t g_num_vertices = meta[0];
+    const int32_t g_num_edges = meta[1];
+
+    /* -------------------------------------------------- */
+    /* 2. Vertex partitioning                             */
+    /* -------------------------------------------------- */
 
     const int32_t verts_per_proc = g_num_vertices / num_ranks;
     const int32_t vertex_offset = rank * verts_per_proc;
-    int32_t l_num_vertices;
 
-    if (rank == num_ranks - 1) {
-        // Last rank takes remaining vertices
-        l_num_vertices = g_num_vertices - vertex_offset;
-    } else {
-        l_num_vertices = verts_per_proc;
-    }
+    int32_t l_num_vertices =
+        (rank == num_ranks - 1)
+            ? (g_num_vertices - vertex_offset)
+            : verts_per_proc;
 
-    *dist_graph = malloc(sizeof(DistributedGraph));
-    if (*dist_graph == NULL) {
-        fprintf(stderr, "Error: Failed to allocate DistributedGraph\n");
+    /* -------------------------------------------------- */
+    /* 3. Allocate DistributedGraph                       */
+    /* -------------------------------------------------- */
+
+    *dist_graph = calloc(1, sizeof(DistributedGraph));
+    if (!*dist_graph)
         return -1;
-    }
-    (*dist_graph)->g_num_vertices = g_num_vertices;
-    (*dist_graph)->g_num_edges = g_num_edges;
-    (*dist_graph)->l_num_vertices = l_num_vertices;
-    (*dist_graph)->vertex_offset = vertex_offset;
-    (*dist_graph)->rank = rank;
-    (*dist_graph)->num_ranks = num_ranks;
-    (*dist_graph)->comm = comm;
 
-    (*dist_graph)->local_row_ptr = malloc(sizeof(int32_t) * (size_t)(l_num_vertices + 1));
-    if ((*dist_graph)->local_row_ptr == NULL) {
-        fprintf(stderr, "Error: Failed to allocate local row ptr\n");
-        free(*dist_graph);
-        return -1;
-    }
+    DistributedGraph *dg = *dist_graph;
 
-    int32_t *sendcounts = malloc(sizeof(int32_t) * (size_t)num_ranks);
-    if (sendcounts == NULL) {
-        fprintf(stderr, "Error: Failed to allocate sendcounts\n");
-        free((*dist_graph)->local_row_ptr);
-        free(*dist_graph);
-        return -1;
-    }
+    dg->g_num_vertices = g_num_vertices;
+    dg->g_num_edges = g_num_edges;
+    dg->l_num_vertices = l_num_vertices;
+    dg->vertex_offset = vertex_offset;
+    dg->rank = rank;
+    dg->num_ranks = num_ranks;
+    dg->comm = comm;
 
-    int32_t *displs = malloc(sizeof(int32_t) * (size_t)num_ranks);
-    if (displs == NULL) {
-        fprintf(stderr, "Error: Failed to allocate displs\n");
-        free(sendcounts);
-        free((*dist_graph)->local_row_ptr);
-        free(*dist_graph);
+    /* -------------------------------------------------- */
+    /* 4. Scatter row_ptr                                 */
+    /* -------------------------------------------------- */
+
+    dg->local_row_ptr = malloc(sizeof(int32_t) * (l_num_vertices + 1));
+    if (!dg->local_row_ptr)
         return -1;
-    }
+
+    int32_t *row_sendcounts = NULL;
+    int32_t *row_displs = NULL;
 
     if (rank == 0) {
+        row_sendcounts = malloc(num_ranks * sizeof(int32_t));
+        row_displs = malloc(num_ranks * sizeof(int32_t));
+
         for (int i = 0; i < num_ranks; i++) {
-            const int32_t offset = i * verts_per_proc;
-            const int32_t count = (i == num_ranks - 1)
-                                      ? (g_num_vertices - offset + 1)
-                                      : (verts_per_proc + 1);
-            sendcounts[i] = count;
-            displs[i] = offset;
-        }
-    }
-    // clang-format off
-    MPI_Scatterv(
-        (rank == 0) ? global_graph->row_ptr : NULL,  // sendbuf (only rank 0)
-        sendcounts,                                // send counts per process
-        displs,                                    // displacements
-        MPI_INT32_T,                               // sendtype
-        (*dist_graph)->local_row_ptr,              // recvbuf
-        l_num_vertices + 1,                        // recvcount
-        MPI_INT32_T,                               // recvtype
-        0,                                         // root
-        comm
-    );
-    // clang-format on
+            row_sendcounts[i] =
+                (i == num_ranks - 1)
+                    ? (g_num_vertices - i * verts_per_proc + 1)
+                    : (verts_per_proc + 1);
 
-    //The row_ptr values need to be adjusted to start from 0:
-    const int32_t offset_adjustment = (*dist_graph)->local_row_ptr[0];
-    for (int32_t i = 0; i <= l_num_vertices; i++) {
-        (*dist_graph)->local_row_ptr[i] -= offset_adjustment;
-    }
-
-    (*dist_graph)->l_num_edges = (*dist_graph)->local_row_ptr[l_num_vertices];
-
-    if (rank == 0) {
-        printf("Rank 0: Allocating %d edges for distribution\n", (*dist_graph)->l_num_edges);
-    }
-
-    (*dist_graph)->local_col_idx = malloc(sizeof(int32_t) * (size_t)(*dist_graph)->l_num_edges);
-    if ((*dist_graph)->local_col_idx == NULL) {
-        fprintf(stderr, "Rank %d: Failed to allocate local col idx (%d edges)\n",
-                rank, (*dist_graph)->l_num_edges);
-        free((*dist_graph)->local_row_ptr);
-        free(*dist_graph);
-        free(sendcounts);
-        free(displs);
-        return -1;
-    }
-
-    // On rank 0: calculate edge counts and offsets for each process
-    if (rank == 0) {
-        for (int i = 0; i < num_ranks; i++) {
-            const int32_t v_offset = i * verts_per_proc;
-            const int32_t v_count = (i == num_ranks - 1)
-                                        ? (g_num_vertices - v_offset)
-                                        : verts_per_proc;
-
-            const int32_t edge_start = global_graph->row_ptr[v_offset];
-            const int32_t edge_end = global_graph->row_ptr[v_offset + v_count];
-
-            sendcounts[i] = edge_end - edge_start;
-            displs[i] = edge_start;
+            row_displs[i] = i * verts_per_proc;
         }
     }
 
     MPI_Scatterv(
-        rank == 0 ? global_graph->col_idx : NULL,
-        sendcounts,
-        displs,
+        rank == 0 ? global_graph->row_ptr : NULL,
+        row_sendcounts,
+        row_displs,
         MPI_INT32_T,
-        (*dist_graph)->local_col_idx,
-        (*dist_graph)->l_num_edges,
+        dg->local_row_ptr,
+        l_num_vertices + 1,
         MPI_INT32_T,
         0,
         comm
         );
 
-    // Cleanup temporary arrays
-    free(sendcounts);
-    free(displs);
+    if (rank == 0) {
+        free(row_sendcounts);
+        free(row_displs);
+    }
+
+    /* -------------------------------------------------- */
+    /* 5. Compute edge partition (GLOBAL row_ptr only)    */
+    /* -------------------------------------------------- */
+
+    int32_t l_num_edges = 0;
+    int32_t *edge_sendcounts = NULL;
+    int32_t *edge_displs = NULL;
+
+    if (rank == 0) {
+        edge_sendcounts = malloc(num_ranks * sizeof(int32_t));
+        edge_displs = malloc(num_ranks * sizeof(int32_t));
+
+        for (int i = 0; i < num_ranks; i++) {
+            int32_t v_offset = i * verts_per_proc;
+            int32_t v_count =
+                (i == num_ranks - 1)
+                    ? (g_num_vertices - v_offset)
+                    : verts_per_proc;
+
+            int32_t e_start = global_graph->row_ptr[v_offset];
+            int32_t e_end = global_graph->row_ptr[v_offset + v_count];
+
+            edge_sendcounts[i] = e_end - e_start;
+            edge_displs[i] = e_start;
+        }
+    }
+
+    MPI_Scatter(
+        edge_sendcounts,
+        1,
+        MPI_INT32_T,
+        &l_num_edges,
+        1,
+        MPI_INT32_T,
+        0,
+        comm
+        );
+
+    dg->l_num_edges = l_num_edges;
+
+    /* -------------------------------------------------- */
+    /* 6. Allocate & scatter col_idx                      */
+    /* -------------------------------------------------- */
+
+    dg->local_col_idx = malloc(sizeof(int32_t) * l_num_edges);
+    if (!dg->local_col_idx)
+        return -1;
+
+    MPI_Scatterv(
+        rank == 0 ? global_graph->col_idx : NULL,
+        edge_sendcounts,
+        edge_displs,
+        MPI_INT32_T,
+        dg->local_col_idx,
+        l_num_edges,
+        MPI_INT32_T,
+        0,
+        comm
+        );
+
+    if (rank == 0) {
+        free(edge_sendcounts);
+        free(edge_displs);
+    }
+
+    /* -------------------------------------------------- */
+    /* 7. Fix local_row_ptr offsets                       */
+    /* -------------------------------------------------- */
+
+    int32_t base = dg->local_row_ptr[0];
+    for (int i = 0; i <= l_num_vertices; i++) {
+        dg->local_row_ptr[i] -= base;
+    }
 
     return 0;
 }
+
 
 /**
  * Link two vertices u and v using union-find with path compression
@@ -422,7 +439,8 @@ static void link_with_remote_parent(int32_t u_local, int32_t remote_parent_globa
 }
 
 static void free_comm_data(CommData *comm) {
-    if (!comm) return;
+    if (!comm)
+        return;
     free(comm->send_counts);
     free(comm->recv_counts);
     free(comm->send_displs);
@@ -432,10 +450,12 @@ static void free_comm_data(CommData *comm) {
 
 static void exchange_and_link_remote(RemoteBuffer *buffers, int32_t *parents,
                                      const DistributedGraph *dg) {
-    if (!buffers || !parents || !dg) return;
+    if (!buffers || !parents || !dg)
+        return;
 
     CommData *comm = prepare_comm_data(buffers, dg->num_ranks, dg->comm);
-    if (!comm) return;
+    if (!comm)
+        return;
 
     if (comm->total_send == 0 && comm->total_recv == 0) {
         free_comm_data(comm);
@@ -471,7 +491,7 @@ static void exchange_and_link_remote(RemoteBuffer *buffers, int32_t *parents,
         send_buf, comm->send_counts, comm->send_displs, MPI_INT32_T,
         recv_buf, comm->recv_counts, comm->recv_displs, MPI_INT32_T,
         dg->comm
-    );
+        );
 
     // Lookup parents for received requests
     for (int i = 0; i < comm->total_recv; i++) {
@@ -493,7 +513,7 @@ static void exchange_and_link_remote(RemoteBuffer *buffers, int32_t *parents,
         parent_recv, comm->recv_counts, comm->recv_displs, MPI_INT32_T,
         send_buf, comm->send_counts, comm->send_displs, MPI_INT32_T,
         dg->comm
-    );
+        );
 
     // Update local parents
     idx = 0;
@@ -827,8 +847,11 @@ CCResult *shiloach_vishkin_mpi(const DistributedGraph *dist_graph) {
 
     // Initialize: each vertex is its own parent (using global IDs)
     for (int32_t i = 0; i < dist_graph->l_num_vertices; i++) {
-        parents[i] = i + dist_graph->vertex_offset;
+        parents[i] = i;
     }
+
+    int rank;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
     /* ===== PHASE 1: Local Union-Find (no communication) ===== */
     for (int32_t u = 0; u < dist_graph->l_num_vertices; u++) {
@@ -844,6 +867,9 @@ CCResult *shiloach_vishkin_mpi(const DistributedGraph *dist_graph) {
                 const int32_t v_local = v_global - dist_graph->vertex_offset;
                 // Bounds check
                 if (v_local >= 0 && v_local < dist_graph->l_num_vertices) {
+
+                    // printf("u: %d, v_local: %d, parent: %d, RANK: %d \n", u, v_local, parents[v_local], rank);
+                    // sleep(1);
                     link_vertices(u, v_local, parents);
                 }
             }

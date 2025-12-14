@@ -30,6 +30,9 @@ typedef struct {
  */
 int partition_graph(const Graph *global_graph, DistributedGraph **dist_graph, MPI_Comm comm);
 
+
+CCResult *afforest_mpi(const DistributedGraph *dist_graph, int32_t neighbor_rounds);
+
 /**
  * Hybrid Shiloach-Vishkin Algorithm with Local Union-Find
  *

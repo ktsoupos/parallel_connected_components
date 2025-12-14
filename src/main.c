@@ -89,6 +89,12 @@ int main(int argc, char **argv) {
     if (rank == 0) {
         printf("=== Connected Components - MPI Distributed Memory Version ===\n\n");
     }
+    int world_size;
+    MPI_Comm_size(MPI_COMM_WORLD, &world_size);  // number of ranks
+
+    if (rank == 0) {
+        printf("Running with %d ranks\n", world_size);
+    }
 #elif defined(__cilk)
     printf("=== Connected Components - OpenCilk Parallel Version ===\n\n");
 #elif defined(_OPENMP)
