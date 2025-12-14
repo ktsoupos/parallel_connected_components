@@ -2,8 +2,8 @@
 #SBATCH --job-name=cc_mpi
 #SBATCH --partition=batch
 #SBATCH --time=1:00:00
-#SBATCH --nodes=2
-#SBATCH --ntasks-per-node=4
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=8G
 #SBATCH --output=logs/mpi_%j.out
@@ -21,6 +21,10 @@ cd $SLURM_SUBMIT_DIR
 
 # Load MPI module
 module load openmpi/5.0.5
+
+# Configure MPI/UCX to avoid warnings and use shared memory
+export UCX_WARN_UNUSED_ENV_VARS=n
+export OMPI_MCA_btl=^openib
 
 # Run MPI benchmarks with different process counts
 for procs in 2 4 8; do
