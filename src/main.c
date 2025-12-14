@@ -8,8 +8,7 @@
 
 #ifdef USE_MPI
 #    include <mpi.h>
-/* MPI headers will go here when you implement them */
-/* #include "mpi/cc_mpi.h" */
+#    include "cc_mpi.h"
 #endif
 
 #ifdef _OPENMP
@@ -53,11 +52,18 @@ static int get_num_threads(void) {
     return (nprocs > 0) ? (int)nprocs : 1;
 }
 
-int main(const int argc, char **argv) {
+int main(int argc, char **argv) {
+#ifdef USE_MPI
+    MPI_Init(&argc, &argv);
+#endif
+
     if (argc < 2) {
         fprintf(stderr, "Usage: %s <graph.mtx> [report_interval]\n", argv[0]);
         fprintf(stderr, "  graph.mtx: Matrix Market format graph file\n");
         fprintf(stderr, "  report_interval: Optional progress report interval (0 = silent)\n");
+#ifdef USE_MPI
+        MPI_Finalize();
+#endif
         return EXIT_FAILURE;
     }
 
@@ -78,7 +84,11 @@ int main(const int argc, char **argv) {
     }
 
 #ifdef USE_MPI
-    printf("=== Connected Components - MPI Distributed Memory Version ===\n\n");
+    int rank;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    if (rank == 0) {
+        printf("=== Connected Components - MPI Distributed Memory Version ===\n\n");
+    }
 #elif defined(__cilk)
     printf("=== Connected Components - OpenCilk Parallel Version ===\n\n");
 #elif defined(_OPENMP)
@@ -90,41 +100,34 @@ int main(const int argc, char **argv) {
 #endif
 
     /* Read graph from MTX file */
+#ifdef USE_MPI
+    Graph *g = NULL;
+    if (rank == 0) {
+        g = read_mtx_file_verbose(filename, report_interval);
+        if (g == NULL) {
+            fprintf(stderr, "Error: Failed to read graph from '%s'\n", filename);
+            MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+            return EXIT_FAILURE;
+        }
+    }
+#else
     Graph *g = read_mtx_file_verbose(filename, report_interval);
     if (g == NULL) {
         fprintf(stderr, "Error: Failed to read graph from '%s'\n", filename);
         return EXIT_FAILURE;
     }
+#endif
 
 #ifdef USE_MPI
-    /* MPI implementation - for now, runs sequential as placeholder */
-    /* You will implement MPI-specific benchmarks here */
-    printf("Note: MPI implementation not yet complete.\n");
-    printf("Running sequential version as placeholder.\n");
-    printf("You will implement distributed Afforest in src/mpi/\n\n");
-
-    const int result = run_sequential_benchmarks(g);
+    /* Run MPI distributed benchmarks */
+    const int result = run_mpi_benchmarks(g);
     if (result != 0) {
-        graph_destroy(g);
+        if (rank == 0 && g != NULL) {
+            graph_destroy(g);
+        }
+        MPI_Finalize();
         return EXIT_FAILURE;
     }
-
-    /* When you implement MPI functions, replace above with:
-     * int rank, num_ranks;
-     * MPI_Init(&argc, &argv);
-     * MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-     * MPI_Comm_size(MPI_COMM_WORLD, &num_ranks);
-     *
-     * int32_t *parents = NULL;
-     * cc_mpi_afforest(g, num_threads, &parents);
-     *
-     * if (rank == 0) {
-     *     int32_t num_components = get_num_components_mpi(parents, g->num_vertices);
-     *     printf("Number of components: %d\n", num_components);
-     * }
-     * free(parents);
-     * MPI_Finalize();
-     */
 #elif defined(__cilk)
     /* Run OpenCilk parallel benchmarks */
     const int num_workers = get_cilk_workers();
@@ -159,7 +162,14 @@ int main(const int argc, char **argv) {
 #endif
 
     /* Cleanup */
+#ifdef USE_MPI
+    if (rank == 0 && g != NULL) {
+        graph_destroy(g);
+    }
+    MPI_Finalize();
+#else
     graph_destroy(g);
+#endif
 
     return EXIT_SUCCESS;
 }

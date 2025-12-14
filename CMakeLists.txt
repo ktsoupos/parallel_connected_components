@@ -194,19 +194,16 @@ if (MPI_C_FOUND)
     message(STATUS "MPI compiler: ${MPI_C_COMPILER}")
     message(STATUS "MPI include path: ${MPI_C_INCLUDE_DIRS}")
 
-    # MPI parallel version - initially just infrastructure
-    # You will add your implementation files to this list
+    # MPI parallel version
     add_executable(cc_mpi
             src/main.c
             src/graph.c
             src/mtx_reader.c
             src/cc_common.c
             src/cc_sequential.c
+            src/mpi/cc_mpi.c
             benchmarks/benchmark_sequential.c
-            # Add your MPI source files here:
-            # src/mpi/cc_mpi.c
-            # src/mpi/graph_partition.c
-            # etc.
+            benchmarks/benchmark_mpi.c
     )
 
     # Link MPI and math library

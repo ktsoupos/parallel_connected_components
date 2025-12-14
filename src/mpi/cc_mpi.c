@@ -501,10 +501,19 @@ static void exchange_and_link_remote(RemoteBuffer *buffers, int32_t *parents,
     // For each requested vertex, lookup its parent value
     for (int i = 0; i < comm->total_recv; i++) {
         const int32_t global_id = recv_buf[i];
-        const int32_t local_id = global_id - dg->vertex_offset;
 
-        // Lookup parent value for this vertex
-        response_buf[i] = parents[local_id];
+        // Check if this vertex belongs to us
+        if (global_id >= dg->vertex_offset &&
+            global_id < dg->vertex_offset + dg->l_num_vertices) {
+            const int32_t local_id = global_id - dg->vertex_offset;
+            response_buf[i] = parents[local_id];
+        } else {
+            // This shouldn't happen, but return the global ID as fallback
+            fprintf(stderr, "Warning: Rank %d received invalid request for vertex %d (owns %d-%d)\n",
+                    dg->rank, global_id, dg->vertex_offset,
+                    dg->vertex_offset + dg->l_num_vertices - 1);
+            response_buf[i] = global_id;
+        }
     }
     int32_t *parent_recv_buf = malloc(sizeof(int32_t) * (size_t)comm->total_send);
     if (parent_recv_buf == NULL) {
@@ -624,7 +633,11 @@ CCResult *afforest_mpi(const DistributedGraph *dist_graph, int32_t neighbor_roun
                 if (is_local) {
                     // Local edge - link immediately
                     const int32_t v_local = v - dist_graph->vertex_offset;
-                    link_vertices(u, v_local, parents);
+                    // Bounds check before linking
+                    if (u >= 0 && u < dist_graph->l_num_vertices &&
+                        v_local >= 0 && v_local < dist_graph->l_num_vertices) {
+                        link_vertices(u, v_local, parents);
+                    }
                 } else {
                     // Remote edge - buffer for later exchange
                     const int owner = get_owner_rank(v, dist_graph);
@@ -730,7 +743,11 @@ CCResult *afforest_mpi(const DistributedGraph *dist_graph, int32_t neighbor_roun
 
             if (is_local) {
                 const int32_t v_local = v - dist_graph->vertex_offset;
-                link_vertices(u, v_local, parents);
+                // Bounds check before linking
+                if (u >= 0 && u < dist_graph->l_num_vertices &&
+                    v_local >= 0 && v_local < dist_graph->l_num_vertices) {
+                    link_vertices(u, v_local, parents);
+                }
             } else {
                 const int owner = get_owner_rank(v, dist_graph);
                 add_remote_edge(&final_remote_bufs[owner], u, v);
@@ -830,6 +847,331 @@ CCResult *afforest_mpi(const DistributedGraph *dist_graph, int32_t neighbor_roun
     result->labels = parents;
     result->num_components = num_components;
     result->num_iterations = neighbor_rounds + 1;
+
+    return result;
+}
+
+/* ============ SHILOACH-VISHKIN ALGORITHM ============ */
+
+/**
+ * Find root of vertex with path compression
+ */
+static int32_t find_root(int32_t v_local, int32_t *parents) {
+    int32_t root = parents[v_local];
+    if (root == parents[v_local])
+        return root;
+
+    // Path compression
+    int32_t current = v_local;
+    while (parents[current] != root) {
+        int32_t next = parents[current];
+        parents[current] = root;
+        current = next;
+        root = parents[current];
+    }
+    return root;
+}
+
+/**
+ * Hybrid Shiloach-Vishkin: Local union-find + distributed hooking
+ */
+CCResult *shiloach_vishkin_mpi(const DistributedGraph *dist_graph) {
+    if (dist_graph == NULL) {
+        fprintf(stderr, "Error: DistributedGraph is NULL\n");
+        return NULL;
+    }
+
+    int32_t *parents = aligned_alloc(64, sizeof(int32_t) * (size_t)dist_graph->l_num_vertices);
+    if (parents == NULL) {
+        fprintf(stderr, "Error: aligned_alloc failed\n");
+        return NULL;
+    }
+
+    // Initialize: each vertex is its own parent (using global IDs)
+    for (int32_t i = 0; i < dist_graph->l_num_vertices; i++) {
+        parents[i] = i + dist_graph->vertex_offset;
+    }
+
+    /* ===== PHASE 1: Local Union-Find (no communication) ===== */
+    for (int32_t u = 0; u < dist_graph->l_num_vertices; u++) {
+        const int32_t start = dist_graph->local_row_ptr[u];
+        const int32_t end = dist_graph->local_row_ptr[u + 1];
+
+        for (int32_t j = start; j < end; j++) {
+            const int32_t v_global = dist_graph->local_col_idx[j];
+
+            // Only process local edges
+            if (v_global >= dist_graph->vertex_offset &&
+                v_global < dist_graph->vertex_offset + dist_graph->l_num_vertices) {
+                const int32_t v_local = v_global - dist_graph->vertex_offset;
+                // Bounds check
+                if (v_local >= 0 && v_local < dist_graph->l_num_vertices) {
+                    link_vertices(u, v_local, parents);
+                }
+            }
+        }
+    }
+
+    /* ===== PHASE 2: Shiloach-Vishkin for boundary vertices ===== */
+
+    // Allocate boundary exchange buffers
+    int32_t *send_buf = malloc(sizeof(int32_t) * (size_t)dist_graph->l_num_vertices);
+    int32_t *recv_buf = malloc(sizeof(int32_t) * (size_t)dist_graph->g_num_vertices);
+
+    if (send_buf == NULL || recv_buf == NULL) {
+        fprintf(stderr, "Error: Failed to allocate exchange buffers\n");
+        free(send_buf);
+        free(recv_buf);
+        free(parents);
+        return NULL;
+    }
+
+    // Initialize recv_buf with all parent values before starting iterations
+    int32_t *recvcounts_init = malloc(sizeof(int32_t) * (size_t)dist_graph->num_ranks);
+    int32_t *displs_init = malloc(sizeof(int32_t) * (size_t)dist_graph->num_ranks);
+
+    if (recvcounts_init == NULL || displs_init == NULL) {
+        fprintf(stderr, "Error: Failed to allocate initial gather buffers\n");
+        free(recvcounts_init);
+        free(displs_init);
+        free(send_buf);
+        free(recv_buf);
+        free(parents);
+        return NULL;
+    }
+
+    int32_t verts_per_proc = dist_graph->g_num_vertices / dist_graph->num_ranks;
+    for (int i = 0; i < dist_graph->num_ranks; i++) {
+        int offset = i * verts_per_proc;
+        recvcounts_init[i] = (i == dist_graph->num_ranks - 1)
+            ? (dist_graph->g_num_vertices - offset)
+            : verts_per_proc;
+        displs_init[i] = offset;
+    }
+
+    for (int32_t i = 0; i < dist_graph->l_num_vertices; i++) {
+        send_buf[i] = parents[i];
+    }
+
+    MPI_Allgatherv(send_buf, dist_graph->l_num_vertices, MPI_INT32_T,
+                   recv_buf, recvcounts_init, displs_init, MPI_INT32_T,
+                   dist_graph->comm);
+
+    free(recvcounts_init);
+    recvcounts_init = NULL;
+    free(displs_init);
+    displs_init = NULL;
+
+    int32_t num_iterations = 0;
+    const int32_t MAX_ITERATIONS = 100;
+    bool global_converged = false;
+
+    while (!global_converged && num_iterations < MAX_ITERATIONS) {
+        num_iterations++;
+        bool local_changed = false;
+
+        /* Hooking phase: link to minimum neighbor */
+        for (int32_t u = 0; u < dist_graph->l_num_vertices; u++) {
+            int32_t my_parent = parents[u];
+            int32_t min_neighbor = my_parent;
+
+            const int32_t start = dist_graph->local_row_ptr[u];
+            const int32_t end = dist_graph->local_row_ptr[u + 1];
+
+            // Find minimum among all neighbors
+            for (int32_t j = start; j < end; j++) {
+                const int32_t v_global = dist_graph->local_col_idx[j];
+
+                if (v_global >= dist_graph->vertex_offset &&
+                    v_global < dist_graph->vertex_offset + dist_graph->l_num_vertices) {
+                    // Local neighbor - direct access
+                    const int32_t v_local = v_global - dist_graph->vertex_offset;
+                    const int32_t neighbor_parent = parents[v_local];
+                    if (neighbor_parent < min_neighbor) {
+                        min_neighbor = neighbor_parent;
+                    }
+                } else {
+                    // Remote neighbor - use last known value from recv_buf
+                    if (v_global >= 0 && v_global < dist_graph->g_num_vertices) {
+                        const int32_t neighbor_parent = recv_buf[v_global];
+                        if (neighbor_parent < min_neighbor) {
+                            min_neighbor = neighbor_parent;
+                        }
+                    }
+                }
+            }
+
+            // Hook to minimum
+            if (min_neighbor < my_parent) {
+                parents[u] = min_neighbor;
+                local_changed = true;
+            }
+        }
+
+        /* Pointer jumping: compress paths */
+        for (int32_t u = 0; u < dist_graph->l_num_vertices; u++) {
+            int32_t parent = parents[u];
+
+            // Check if parent is local
+            if (parent >= dist_graph->vertex_offset &&
+                parent < dist_graph->vertex_offset + dist_graph->l_num_vertices) {
+                int32_t parent_local = parent - dist_graph->vertex_offset;
+                int32_t grandparent = parents[parent_local];
+
+                if (grandparent < parent) {
+                    parents[u] = grandparent;
+                    local_changed = true;
+                }
+            } else {
+                // Parent is remote - use recv_buf
+                if (parent >= 0 && parent < dist_graph->g_num_vertices) {
+                    int32_t grandparent = recv_buf[parent];
+                    if (grandparent < parent) {
+                        parents[u] = grandparent;
+                        local_changed = true;
+                    }
+                }
+            }
+        }
+
+        /* Exchange parent values via Allgatherv */
+        int32_t *recvcounts = NULL;
+        int32_t *displs = NULL;
+
+        if (dist_graph->rank == 0) {
+            recvcounts = malloc(sizeof(int32_t) * (size_t)dist_graph->num_ranks);
+            displs = malloc(sizeof(int32_t) * (size_t)dist_graph->num_ranks);
+
+            if (recvcounts == NULL || displs == NULL) {
+                free(recvcounts);
+                free(displs);
+                free(send_buf);
+                free(recv_buf);
+                free(parents);
+                return NULL;
+            }
+
+            int32_t verts_per_proc = dist_graph->g_num_vertices / dist_graph->num_ranks;
+            for (int i = 0; i < dist_graph->num_ranks; i++) {
+                int offset = i * verts_per_proc;
+                recvcounts[i] = (i == dist_graph->num_ranks - 1)
+                    ? (dist_graph->g_num_vertices - offset)
+                    : verts_per_proc;
+                displs[i] = offset;
+            }
+        }
+
+        // Broadcast recvcounts and displs to all ranks
+        if (dist_graph->rank != 0) {
+            recvcounts = malloc(sizeof(int32_t) * (size_t)dist_graph->num_ranks);
+            displs = malloc(sizeof(int32_t) * (size_t)dist_graph->num_ranks);
+        }
+
+        MPI_Bcast(recvcounts, dist_graph->num_ranks, MPI_INT32_T, 0, dist_graph->comm);
+        MPI_Bcast(displs, dist_graph->num_ranks, MPI_INT32_T, 0, dist_graph->comm);
+
+        // Copy local parents to send buffer
+        for (int32_t i = 0; i < dist_graph->l_num_vertices; i++) {
+            send_buf[i] = parents[i];
+        }
+
+        MPI_Allgatherv(send_buf, dist_graph->l_num_vertices, MPI_INT32_T,
+                       recv_buf, recvcounts, displs, MPI_INT32_T,
+                       dist_graph->comm);
+
+        free(recvcounts);
+        recvcounts = NULL;
+        free(displs);
+        displs = NULL;
+
+        /* Check global convergence */
+        MPI_Allreduce(&local_changed, &global_converged, 1, MPI_C_BOOL,
+                      MPI_LOR, dist_graph->comm);
+        global_converged = !global_converged;
+    }
+
+    free(send_buf);
+    send_buf = NULL;
+    free(recv_buf);
+    recv_buf = NULL;
+
+    if (dist_graph->rank == 0) {
+        printf("Shiloach-Vishkin converged in %d iterations\n", num_iterations);
+    }
+
+    /* ===== PHASE 3: Count components ===== */
+    int32_t *all_parents = NULL;
+    int32_t *recvcounts = NULL;
+    int32_t *displs = NULL;
+
+    if (dist_graph->rank == 0) {
+        all_parents = malloc(sizeof(int32_t) * (size_t)dist_graph->g_num_vertices);
+        recvcounts = malloc(sizeof(int32_t) * (size_t)dist_graph->num_ranks);
+        displs = malloc(sizeof(int32_t) * (size_t)dist_graph->num_ranks);
+
+        if (all_parents == NULL || recvcounts == NULL || displs == NULL) {
+            fprintf(stderr, "Error: Failed to allocate gathering buffers\n");
+            free(all_parents);
+            free(recvcounts);
+            free(displs);
+            free(parents);
+            return NULL;
+        }
+
+        int32_t verts_per_proc = dist_graph->g_num_vertices / dist_graph->num_ranks;
+        for (int i = 0; i < dist_graph->num_ranks; i++) {
+            int offset = i * verts_per_proc;
+            recvcounts[i] = (i == dist_graph->num_ranks - 1)
+                ? (dist_graph->g_num_vertices - offset)
+                : verts_per_proc;
+            displs[i] = offset;
+        }
+    }
+
+    MPI_Gatherv(parents, dist_graph->l_num_vertices, MPI_INT32_T,
+                all_parents, recvcounts, displs, MPI_INT32_T,
+                0, dist_graph->comm);
+
+    int32_t num_components = 0;
+    if (dist_graph->rank == 0) {
+        bool *seen = calloc((size_t)dist_graph->g_num_vertices, sizeof(bool));
+        if (seen == NULL) {
+            fprintf(stderr, "Error: Failed to allocate seen array\n");
+            free(all_parents);
+            free(recvcounts);
+            free(displs);
+            free(parents);
+            return NULL;
+        }
+
+        for (int32_t i = 0; i < dist_graph->g_num_vertices; i++) {
+            int32_t root = all_parents[i];
+            if (root >= 0 && root < dist_graph->g_num_vertices && !seen[root]) {
+                seen[root] = true;
+                num_components++;
+            }
+        }
+
+        free(seen);
+        free(all_parents);
+        free(recvcounts);
+        free(displs);
+
+        printf("Found %d connected components\n", num_components);
+    }
+
+    MPI_Bcast(&num_components, 1, MPI_INT32_T, 0, dist_graph->comm);
+
+    CCResult *result = malloc(sizeof(CCResult));
+    if (result == NULL) {
+        fprintf(stderr, "Error: Failed to allocate CCResult\n");
+        free(parents);
+        return NULL;
+    }
+
+    result->labels = parents;
+    result->num_components = num_components;
+    result->num_iterations = num_iterations;
 
     return result;
 }
