@@ -19,8 +19,8 @@ echo "Number of tasks: $SLURM_NTASKS"
 # Navigate to project directory
 cd $SLURM_SUBMIT_DIR
 
-# Load MPI module if needed
-# module load openmpi
+# Load MPI module
+module load openmpi/5.0.5
 
 # Run MPI benchmarks with different process counts
 for procs in 2 4 8; do
@@ -29,7 +29,7 @@ for procs in 2 4 8; do
     echo "========================================="
 
     echo "MPI Shiloach-Vishkin algorithm:"
-    mpirun -np $procs ./build/cc_mpi data/medium_graph.mtx 10000
+    srun -n $procs ./build/cc_mpi data/medium_graph.mtx 10000
 
 done
 
