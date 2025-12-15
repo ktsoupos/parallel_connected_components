@@ -41,7 +41,7 @@ for NPROCS in 2 4 8; do
         echo "Running with $NPROCS MPI processes"
         echo "=========================================="
 
-        mpirun -np $NPROCS ./build/cc_mpi $GRAPH 0
+        srun --ntasks=$NPROCS --unbuffered ./build/cc_mpi $GRAPH 0
 
         echo ""
         echo ""

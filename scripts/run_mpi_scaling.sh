@@ -61,7 +61,7 @@ for GRAPH in "${GRAPHS[@]}"; do
             # Run benchmark and save to separate file
             OUTPUT_FILE="results/${GRAPH_NAME}_np${NPROCS}_${SLURM_JOB_ID}.txt"
 
-            mpirun -np $NPROCS ./build/cc_mpi $GRAPH 0 | tee "$OUTPUT_FILE"
+            srun --ntasks=$NPROCS --unbuffered ./build/cc_mpi $GRAPH 0 | tee "$OUTPUT_FILE"
 
             echo ""
         fi

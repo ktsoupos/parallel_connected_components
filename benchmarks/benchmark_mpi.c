@@ -20,6 +20,7 @@ int run_mpi_benchmarks(const Graph *g) {
         printf("\n=== MPI Distributed Benchmarks (%d processes) ===\n", num_ranks);
         printf("Graph: %d vertices, %d edges\n",
                graph_get_num_vertices(g), graph_get_num_edges(g));
+        fflush(stdout);
     }
 
     /* Sequential baselines (rank 0 only, for comparison) */
@@ -30,6 +31,7 @@ int run_mpi_benchmarks(const Graph *g) {
 
     if (rank == 0) {
         printf("\n=== Sequential Baseline (Union-Find Edge Reorder) ===\n");
+        fflush(stdout);
         const double start_seq = MPI_Wtime();
         result_seq_uf = union_find_cc_edge_reorder(g);
         const double end_seq = MPI_Wtime();
@@ -44,6 +46,7 @@ int run_mpi_benchmarks(const Graph *g) {
         cc_result_print_stats(result_seq_uf, g);
 
         printf("\n=== Sequential Baseline (Label Propagation) ===\n");
+        fflush(stdout);
         const double start_lp = MPI_Wtime();
         result_seq_lp = label_propagation_min(g);
         const double end_lp = MPI_Wtime();
@@ -60,8 +63,20 @@ int run_mpi_benchmarks(const Graph *g) {
     }
 
     /* Partition graph across all processes */
+    if (rank == 0) {
+        printf("\nPartitioning graph across %d processes...\n", num_ranks);
+        fflush(stdout);
+    }
+
     DistributedGraph *dist_graph = NULL;
     const int partition_result = partition_graph(g, &dist_graph, MPI_COMM_WORLD);
+
+    if (rank == 0) {
+        printf("Partitioning complete!\n");
+        printf("  Local vertices per process: ~%d\n", dist_graph->l_num_vertices);
+        printf("  Local edges per process: ~%d\n", dist_graph->l_num_edges);
+        fflush(stdout);
+    }
 
     if (partition_result != 0) {
         fprintf(stderr, "Rank %d: Error partitioning graph\n", rank);
@@ -77,6 +92,7 @@ int run_mpi_benchmarks(const Graph *g) {
     /* MPI Label Propagation Algorithm */
     if (rank == 0) {
         printf("\n=== MPI Label Propagation Connected Components ===\n");
+        fflush(stdout);
     }
 
     const double start_lp = MPI_Wtime();
@@ -115,6 +131,7 @@ int run_mpi_benchmarks(const Graph *g) {
     /* MPI Label Propagation Simple Async (MPI_Iallgatherv) */
     if (rank == 0) {
         printf("\n=== MPI Label Propagation Simple Async (MPI_Iallgatherv) ===\n");
+        fflush(stdout);
     }
 
     const double start_lp_simple = MPI_Wtime();
@@ -150,6 +167,7 @@ int run_mpi_benchmarks(const Graph *g) {
     /* MPI Label Propagation Optimized (Ghost Exchange) */
     if (rank == 0) {
         printf("\n=== MPI Label Propagation Optimized (Ghost/Halo Exchange + Async) ===\n");
+        fflush(stdout);
     }
 
     const double start_lp_opt = MPI_Wtime();
@@ -197,6 +215,7 @@ int run_mpi_benchmarks(const Graph *g) {
     /* MPI Label Propagation Fully Async (Progressive Boundary Processing) */
     if (rank == 0) {
         printf("\n=== MPI Label Propagation Fully Async (Progressive Boundary + MPI_Testsome) ===\n");
+        fflush(stdout);
     }
 
     const double start_lp_async = MPI_Wtime();

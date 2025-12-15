@@ -53,10 +53,20 @@ done
 
 # MPI benchmarks
 echo -e "${GREEN}=== MPI Distributed Benchmarks ===${NC}"
+
+# Detect if running on SLURM cluster
+if [ -n "$SLURM_JOB_ID" ]; then
+    MPI_CMD="srun --ntasks"
+    echo "Detected SLURM environment, using srun"
+else
+    MPI_CMD="mpirun -np"
+    echo "Using mpirun"
+fi
+
 for procs in 2 4 8; do
     if [ $procs -le $MAX_PROCS ]; then
         echo -e "${YELLOW}MPI with $procs processes:${NC}"
-        mpirun -np $procs ./build/cc_mpi $GRAPH 0 2>&1 | grep -A5 "MPI Performance Summary" | tail -10
+        $MPI_CMD $procs ./build/cc_mpi $GRAPH 0 2>&1 | grep -A5 "MPI Performance Summary" | tail -10
         echo ""
     fi
 done
