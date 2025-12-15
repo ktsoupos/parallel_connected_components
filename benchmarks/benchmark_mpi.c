@@ -112,6 +112,41 @@ int run_mpi_benchmarks(const Graph *g) {
 
     MPI_Barrier(MPI_COMM_WORLD);
 
+    /* MPI Label Propagation Simple Async (MPI_Iallgatherv) */
+    if (rank == 0) {
+        printf("\n=== MPI Label Propagation Simple Async (MPI_Iallgatherv) ===\n");
+    }
+
+    const double start_lp_simple = MPI_Wtime();
+    CCResult *result_mpi_lp_simple = mpi_label_propagation_simple_async(dist_graph);
+    const double end_lp_simple = MPI_Wtime();
+
+    if (result_mpi_lp_simple == NULL) {
+        fprintf(stderr, "Rank %d: Error in MPI Label Propagation Simple Async algorithm\n", rank);
+        cc_result_destroy(result_mpi_lp);
+        free(dist_graph->local_row_ptr);
+        free(dist_graph->local_col_idx);
+        free(dist_graph);
+        if (rank == 0) {
+            if (result_seq_uf != NULL) cc_result_destroy(result_seq_uf);
+            if (result_seq_lp != NULL) cc_result_destroy(result_seq_lp);
+        }
+        return -1;
+    }
+
+    const double elapsed_mpi_lp_simple = end_lp_simple - start_lp_simple;
+
+    if (rank == 0) {
+        printf("MPI LP Simple Async completed in %.5f seconds\n", elapsed_mpi_lp_simple);
+        printf("  Components: %d\n", result_mpi_lp_simple->num_components);
+        printf("  Iterations: %d\n", result_mpi_lp_simple->num_iterations);
+        printf("  Speedup vs Sequential LP: %.2fx\n", elapsed_seq_lp / elapsed_mpi_lp_simple);
+        printf("  Speedup vs Sequential UF: %.2fx\n", elapsed_seq_uf / elapsed_mpi_lp_simple);
+        printf("  Speedup vs MPI LP (basic): %.2fx\n", elapsed_mpi_lp / elapsed_mpi_lp_simple);
+    }
+
+    MPI_Barrier(MPI_COMM_WORLD);
+
     /* MPI Label Propagation Optimized (Ghost Exchange) */
     if (rank == 0) {
         printf("\n=== MPI Label Propagation Optimized (Ghost/Halo Exchange + Async) ===\n");
@@ -157,21 +192,75 @@ int run_mpi_benchmarks(const Graph *g) {
         printf("  Speedup vs MPI LP (basic): %.2fx\n", elapsed_mpi_lp / elapsed_mpi_lp_opt);
     }
 
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    /* MPI Label Propagation Fully Async (Progressive Boundary Processing) */
+    if (rank == 0) {
+        printf("\n=== MPI Label Propagation Fully Async (Progressive Boundary + MPI_Testsome) ===\n");
+    }
+
+    const double start_lp_async = MPI_Wtime();
+    CCResult *result_mpi_lp_async = mpi_label_propagation_async(dist_graph);
+    const double end_lp_async = MPI_Wtime();
+
+    if (result_mpi_lp_async == NULL) {
+        fprintf(stderr, "Rank %d: Error in MPI Label Propagation Async algorithm\n", rank);
+        cc_result_destroy(result_mpi_lp);
+        cc_result_destroy(result_mpi_lp_opt);
+        free(dist_graph->local_row_ptr);
+        free(dist_graph->local_col_idx);
+        free(dist_graph->ghost_global_ids);
+        free(dist_graph->ghost_to_owner);
+        free(dist_graph->ghost_labels);
+        free(dist_graph->send_counts);
+        free(dist_graph->recv_counts);
+        free(dist_graph->send_displs);
+        free(dist_graph->recv_displs);
+        for (int r = 0; r < num_ranks; r++) {
+            free(dist_graph->send_vertices[r]);
+        }
+        free(dist_graph->send_vertices);
+        free(dist_graph);
+        if (rank == 0) {
+            if (result_seq_uf != NULL) cc_result_destroy(result_seq_uf);
+            if (result_seq_lp != NULL) cc_result_destroy(result_seq_lp);
+        }
+        return -1;
+    }
+
+    const double elapsed_mpi_lp_async = end_lp_async - start_lp_async;
+
+    if (rank == 0) {
+        printf("MPI LP Fully Async completed in %.5f seconds\n", elapsed_mpi_lp_async);
+        printf("  Components: %d\n", result_mpi_lp_async->num_components);
+        printf("  Iterations: %d\n", result_mpi_lp_async->num_iterations);
+        printf("  Speedup vs Sequential LP: %.2fx\n", elapsed_seq_lp / elapsed_mpi_lp_async);
+        printf("  Speedup vs Sequential UF: %.2fx\n", elapsed_seq_uf / elapsed_mpi_lp_async);
+        printf("  Speedup vs MPI LP (basic): %.2fx\n", elapsed_mpi_lp / elapsed_mpi_lp_async);
+        printf("  Speedup vs MPI LP Optimized: %.2fx\n", elapsed_mpi_lp_opt / elapsed_mpi_lp_async);
+    }
+
     /* Performance Summary */
     if (rank == 0) {
         printf("\n=== MPI Performance Summary ===\n");
-        printf("%-35s %12s %12s %12s\n", "Algorithm", "Time (s)", "Components", "Speedup");
-        printf("%-35s %12.5f %12d %12s\n",
+        printf("%-45s %12s %12s %12s\n", "Algorithm", "Time (s)", "Components", "Speedup");
+        printf("%-45s %12.5f %12d %12s\n",
                "Sequential UF", elapsed_seq_uf, result_seq_uf->num_components, "1.00x");
-        printf("%-35s %12.5f %12d %12.2fx\n",
+        printf("%-45s %12.5f %12d %12.2fx\n",
                "Sequential LP", elapsed_seq_lp, result_seq_lp->num_components,
                elapsed_seq_uf / elapsed_seq_lp);
-        printf("%-35s %12.5f %12d %12.2fx\n",
-               "MPI LP (Allgatherv)", elapsed_mpi_lp, result_mpi_lp->num_components,
+        printf("%-45s %12.5f %12d %12.2fx\n",
+               "MPI LP (sync Allgatherv)", elapsed_mpi_lp, result_mpi_lp->num_components,
                elapsed_seq_uf / elapsed_mpi_lp);
-        printf("%-35s %12.5f %12d %12.2fx\n",
+        printf("%-45s %12.5f %12d %12.2fx\n",
+               "MPI LP Simple Async (Iallgatherv)", elapsed_mpi_lp_simple, result_mpi_lp_simple->num_components,
+               elapsed_seq_uf / elapsed_mpi_lp_simple);
+        printf("%-45s %12.5f %12d %12.2fx\n",
                "MPI LP Optimized (Ghost+Async)", elapsed_mpi_lp_opt, result_mpi_lp_opt->num_components,
                elapsed_seq_uf / elapsed_mpi_lp_opt);
+        printf("%-45s %12.5f %12d %12.2fx\n",
+               "MPI LP Fully Async (Ghost+MPI_Testsome)", elapsed_mpi_lp_async, result_mpi_lp_async->num_components,
+               elapsed_seq_uf / elapsed_mpi_lp_async);
     }
 
     /* Cleanup */
@@ -180,7 +269,9 @@ int run_mpi_benchmarks(const Graph *g) {
         if (result_seq_lp != NULL) cc_result_destroy(result_seq_lp);
     }
     cc_result_destroy(result_mpi_lp);
+    cc_result_destroy(result_mpi_lp_simple);
     cc_result_destroy(result_mpi_lp_opt);
+    cc_result_destroy(result_mpi_lp_async);
 
     /* Free distributed graph and ghost structures */
     free(dist_graph->local_row_ptr);

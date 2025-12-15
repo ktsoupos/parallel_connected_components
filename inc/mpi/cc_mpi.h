@@ -45,12 +45,25 @@ typedef struct {
 int partition_graph(const Graph *global_graph, DistributedGraph **dist_graph, MPI_Comm comm);
 
 /**
- * MPI Label Propagation for Connected Components
+ * MPI Label Propagation for Connected Components (Synchronous)
  *
  * @param dg - Distributed graph structure
  * @return CCResult with component labels (rank 0 only), or NULL on error
  */
 CCResult *mpi_label_propagation(const DistributedGraph *dg);
+
+/**
+ * Simple Async MPI Label Propagation (uses MPI_Iallgatherv)
+ *
+ * Uses:
+ * - MPI_Iallgatherv (non-blocking collective)
+ * - Same data exchange pattern as basic version
+ * - No ghost vertex overhead
+ *
+ * @param dg - Distributed graph structure
+ * @return CCResult with component labels (rank 0 only), or NULL on error
+ */
+CCResult *mpi_label_propagation_simple_async(const DistributedGraph *dg);
 
 /**
  * Optimized MPI Label Propagation with Ghost/Halo Exchange
@@ -64,3 +77,17 @@ CCResult *mpi_label_propagation(const DistributedGraph *dg);
  * @return CCResult with component labels (rank 0 only), or NULL on error
  */
 CCResult *mpi_label_propagation_optimized(const DistributedGraph *dg);
+
+/**
+ * Fully Asynchronous MPI Label Propagation with Progressive Boundary Processing
+ *
+ * Uses:
+ * - Ghost vertex communication (only boundary vertices)
+ * - MPI_Testsome for fine-grained receive completion tracking
+ * - Progressive boundary processing as ghost data arrives
+ * - Maximum computation/communication overlap
+ *
+ * @param dg - Distributed graph structure with ghost metadata
+ * @return CCResult with component labels (rank 0 only), or NULL on error
+ */
+CCResult *mpi_label_propagation_async(const DistributedGraph *dg);
