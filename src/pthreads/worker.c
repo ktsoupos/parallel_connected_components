@@ -1,11 +1,12 @@
 #ifdef __linux__
-#define _GNU_SOURCE
+#    define _GNU_SOURCE
 #endif
 
 #include "worker.h"
 #include "deque.h"
 #include "utils.h"
 
+#include <pthread.h>
 #include <sched.h>
 #include <stdatomic.h>
 #include <stddef.h>
@@ -13,15 +14,12 @@
 #include <stdlib.h>
 #include <time.h>
 #include <unistd.h>
-#include <pthread.h>
-
 
 #define NUM_STEAL_MAX_ATTEMPTS 3
 
 // Thread-local storage: each thread knows which worker it is
 static __thread Worker *current_worker = NULL;
 static __thread ThreadPool *current_pool = NULL;
-
 
 // XORShift64 - fast, simple PRNG for per-worker random numbers
 static inline uint64_t xorshift64(uint64_t *state) {
@@ -111,7 +109,6 @@ int32_t worker_select_victim(Worker *w, const int32_t num_workers) {
     return victim;
 }
 
-
 void *worker_thread_func(void *arg) {
     Worker *worker = (Worker *)arg;
     ThreadPool *pool = worker->pool;
@@ -125,10 +122,10 @@ void *worker_thread_func(void *arg) {
 
         pthread_t current_thread = pthread_self();
         if (pthread_setaffinity_np(current_thread, sizeof(cpu_set_t), &cpuset) != 0) {
-#ifdef DEBUG
+#    ifdef DEBUG
             fprintf(stderr, "[CPU Affinity] Warning: Failed to pin worker %d to core %d\n",
                     worker->id, worker->numa_node);
-#endif
+#    endif
         }
     }
 #endif
@@ -179,9 +176,7 @@ void worker_main_loop(struct Worker *worker, struct ThreadPool *pool) {
                 task->func(task);
 
             // decrement active_tasks
-            int64_t prev = atomic_fetch_sub_explicit(
-                &pool->active_tasks, 1, memory_order_acq_rel
-                );
+            int64_t prev = atomic_fetch_sub_explicit(&pool->active_tasks, 1, memory_order_acq_rel);
 
             // signal main thread IF we reached 0
             if (prev == 1) {
@@ -206,7 +201,6 @@ void worker_main_loop(struct Worker *worker, struct ThreadPool *pool) {
         worker_backoff(++idle_count);
     }
 }
-
 
 void worker_backoff(int idle_count) {
     if (idle_count < 10) {

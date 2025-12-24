@@ -16,7 +16,7 @@
  *
  * Returns: Graph pointer on success, NULL on failure
  */
-Graph* read_mtx_file(const char* filename);
+Graph *read_mtx_file(const char *filename);
 
 /**
  * Read MTX file with progress reporting
@@ -24,4 +24,4 @@ Graph* read_mtx_file(const char* filename);
  *
  * Returns: Graph pointer on success, NULL on failure
  */
-Graph* read_mtx_file_verbose(const char* filename, int32_t report_interval);
+Graph *read_mtx_file_verbose(const char *filename, int32_t report_interval);

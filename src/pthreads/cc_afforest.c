@@ -1,17 +1,17 @@
-#include "cc_pthreads.h"
 #include "cc_common.h"
+#include "cc_pthreads.h"
 #include "definitions.h"
 #include "deque.h"
 #include "threadpool.h"
 #include "worker.h"
 
+#include <errno.h>
+#include <sched.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <errno.h>
-#include <sched.h>
 #include <unistd.h>
 
 typedef struct AfforestContext {
@@ -46,8 +46,8 @@ static inline void link_vertices(int32_t u, int32_t v, int32_t *restrict parents
             break;
 
         int32_t expected = p_high;
-        if (__atomic_compare_exchange_n(&parents[high], &expected, low, false,
-                                        __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
+        if (__atomic_compare_exchange_n(&parents[high], &expected, low, false, __ATOMIC_SEQ_CST,
+                                        __ATOMIC_SEQ_CST))
             break;
 
         if (++retry == 10000) {
@@ -122,8 +122,8 @@ static void process_final_link_chunk(Task *task) {
 }
 
 /* Sample largest component */
-static int32_t
-sample_frequent_element(int32_t *parents, int32_t num_vertices, int32_t num_samples) {
+static int32_t sample_frequent_element(int32_t *parents, int32_t num_vertices,
+                                       int32_t num_samples) {
     int32_t *counts = calloc((size_t)num_vertices, sizeof(int32_t));
     if (!counts)
         return 0;
@@ -216,7 +216,6 @@ CCResult *afforest_pthreads(const Graph *g, int32_t num_threads, int32_t neighbo
         threadpool_wake_workers(pool);
         threadpool_wait(pool);
 
-
         // Compression
         for (int32_t i = 0; i < num_chunks; i++) {
             Task *task = &context->task_pool[i];
@@ -228,13 +227,11 @@ CCResult *afforest_pthreads(const Graph *g, int32_t num_threads, int32_t neighbo
                 // atomic_fetch_sub(&pool->active_tasks, 1);
             } else {
                 atomic_fetch_add(&pool->active_tasks, 1);
-
             }
         }
 
         threadpool_wake_workers(pool);
         threadpool_wait(pool);
-
     }
 
     // ===========================
@@ -265,7 +262,6 @@ CCResult *afforest_pthreads(const Graph *g, int32_t num_threads, int32_t neighbo
             // atomic_fetch_sub(&pool->active_tasks, 1);
         } else {
             atomic_fetch_add(&pool->active_tasks, 1);
-
         }
     }
 
@@ -286,7 +282,6 @@ CCResult *afforest_pthreads(const Graph *g, int32_t num_threads, int32_t neighbo
             // atomic_fetch_sub(&pool->active_tasks, 1);
         } else {
             atomic_fetch_add(&pool->active_tasks, 1);
-
         }
     }
 

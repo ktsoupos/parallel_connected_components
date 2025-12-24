@@ -1,10 +1,10 @@
 # Makefile for Parallel Connected Components
 # Provides simple interface for building all targets
 
-.PHONY: all clean sequential openmp pthreads opencilk test help
+.PHONY: all clean sequential openmp pthreads opencilk mpi test help
 
 # Default target
-all: sequential openmp pthreads
+all: sequential openmp pthreads mpi
 	@echo "==================================="
 	@echo "Build complete!"
 	@echo "==================================="
@@ -12,6 +12,7 @@ all: sequential openmp pthreads
 	@echo "  build/cc_sequential - Sequential implementation"
 	@echo "  build/cc_openmp     - OpenMP parallel implementation"
 	@echo "  build/cc_pthreads   - PThreads work-stealing implementation"
+	@echo "  build/cc_mpi        - MPI distributed memory implementation"
 	@echo ""
 	@echo "To build OpenCilk version:"
 	@echo "  make opencilk"
@@ -23,9 +24,9 @@ all: sequential openmp pthreads
 build:
 	@mkdir -p build
 
-# Sequential + OpenMP + PThreads (standard build)
-sequential openmp pthreads: build
-	@echo "Building standard targets (Sequential, OpenMP, PThreads)..."
+# Sequential + OpenMP + PThreads + MPI (standard build)
+sequential openmp pthreads mpi: build
+	@echo "Building standard targets (Sequential, OpenMP, PThreads, MPI)..."
 	cmake -B build -DCMAKE_BUILD_TYPE=Release
 	cmake --build build -j$(shell nproc)
 
@@ -94,11 +95,12 @@ help:
 	@echo "Parallel Connected Components - Build System"
 	@echo ""
 	@echo "Targets:"
-	@echo "  make                 - Build all standard targets (sequential, OpenMP, PThreads)"
+	@echo "  make                 - Build all standard targets (sequential, OpenMP, PThreads, MPI)"
 	@echo "  make all             - Same as default"
 	@echo "  make sequential      - Build only sequential version"
 	@echo "  make openmp          - Build only OpenMP version"
 	@echo "  make pthreads        - Build only PThreads version"
+	@echo "  make mpi             - Build only MPI version"
 	@echo "  make opencilk        - Build OpenCilk version (requires OpenCilk compiler)"
 	@echo "  make test            - Run correctness tests"
 	@echo "  make benchmark       - Run performance benchmarks"
@@ -108,9 +110,15 @@ help:
 	@echo "Requirements:"
 	@echo "  - CMake 3.19.2+"
 	@echo "  - GCC 11.4+ (with OpenMP support)"
+	@echo "  - MPI implementation (OpenMPI or MPICH)"
 	@echo "  - OpenCilk (optional, for opencilk target)"
 	@echo ""
+	@echo "MPI Installation:"
+	@echo "  Ubuntu/Debian: sudo apt-get install libopenmpi-dev openmpi-bin"
+	@echo "  Fedora/RHEL:   sudo dnf install openmpi-devel"
+	@echo ""
 	@echo "Examples:"
-	@echo "  make && make test                    # Build and test"
-	@echo "  make benchmark                        # Run performance tests"
-	@echo "  ./build/cc_sequential data/graph.mtx # Run sequential on custom graph"
+	@echo "  make && make test                      # Build and test"
+	@echo "  make benchmark                          # Run performance tests"
+	@echo "  ./build/cc_sequential data/graph.mtx   # Run sequential on custom graph"
+	@echo "  mpirun -np 4 ./build/cc_mpi data/graph.mtx  # Run MPI with 4 processes"

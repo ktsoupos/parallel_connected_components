@@ -1,11 +1,10 @@
 #include "cc_openmp.h"
 #include "cc_common.h"
+#include <omp.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdbool.h>
-#include <omp.h>
 #include <time.h>
-
 
 int set_omp_threads(int num_threads) {
     if (num_threads <= 0) {
@@ -30,9 +29,7 @@ void openmp_hello_world(void) {
         const int total_threads = omp_get_num_threads();
 
 #pragma omp critical
-        {
-            printf("  Hello from thread %d of %d\n", thread_id, total_threads);
-        }
+        { printf("  Hello from thread %d of %d\n", thread_id, total_threads); }
     }
 
     printf("\nParallel region completed!\n");
@@ -62,8 +59,8 @@ CCResult *label_propagation_sync_omp(const Graph *restrict g, const int num_thre
     }
 
     /* Allocate labels arrays - need two for double buffering */
-    int32_t *labels_curr = malloc(sizeof(int32_t) * (size_t) num_vertices);
-    int32_t *labels_next = malloc(sizeof(int32_t) * (size_t) num_vertices);
+    int32_t *labels_curr = malloc(sizeof(int32_t) * (size_t)num_vertices);
+    int32_t *labels_next = malloc(sizeof(int32_t) * (size_t)num_vertices);
 
     if (labels_curr == NULL || labels_next == NULL) {
         fprintf(stderr, "Error: Failed to allocate labels arrays\n");
@@ -85,14 +82,16 @@ CCResult *label_propagation_sync_omp(const Graph *restrict g, const int num_thre
     const int32_t max_iterations = num_vertices; // Convergence bound: at most n iterations
 
     /* Note: Static analyzers may warn about this loop, but the OpenMP reduction
-     * clause correctly updates 'changed' across threads, allowing proper termination. max_iterations.
-     * max_iterations signals compiler that the loop will be terminated*/
+     * clause correctly updates 'changed' across threads, allowing proper termination.
+     * max_iterations. max_iterations signals compiler that the loop will be terminated*/
     do {
         result->num_iterations++;
         changed = false;
 
         /* All vertices update their labels in parallel */
-#pragma omp parallel for default(none) shared(g, labels_curr, labels_next, num_vertices) reduction(||:changed)
+#pragma omp parallel for default(none) shared(g, labels_curr, labels_next, num_vertices)           \
+    reduction(||                                                                                   \
+              : changed)
         for (int32_t v = 0; v < num_vertices; v++) {
             int32_t num_neighbors;
             const int32_t *restrict neighbors = graph_get_neighbors(g, v, &num_neighbors);
@@ -165,7 +164,7 @@ CCResult *label_propagation_async_omp(const Graph *restrict g, int num_threads) 
     }
 
     /* Allocate aligned label array for better cache performance */
-    int32_t *restrict labels = aligned_alloc(64, sizeof(int32_t) * (size_t) num_vertices);
+    int32_t *restrict labels = aligned_alloc(64, sizeof(int32_t) * (size_t)num_vertices);
     if (labels == NULL) {
         fprintf(stderr, "Error: Failed to allocate label array\n");
         free(result);
@@ -227,9 +226,7 @@ CCResult *label_propagation_async_omp(const Graph *restrict g, int num_threads) 
                 }
             }
 #pragma omp critical
-            {
-                changed |= local_changed;
-            }
+            { changed |= local_changed; }
         }
     } // end while
 
@@ -247,15 +244,14 @@ CCResult *label_propagation_async_omp(const Graph *restrict g, int num_threads) 
     return result;
 }
 
-
 /**
  * Hook phase helper: Attempts to hook smaller component roots to neighbors
  * Returns true if any hooking occurred
  * (Ignore static analyser warning)
  */
 
-static bool hook_phase(const int32_t *restrict row_ptr, const int32_t *restrict col_idx, int32_t *restrict parents,
-                       const int32_t num_vertices) {
+static bool hook_phase(const int32_t *restrict row_ptr, const int32_t *restrict col_idx,
+                       int32_t *restrict parents, const int32_t num_vertices) {
     bool hooking = false;
 
     /* For all vertices in parallel - use schedule(guided) for load balancing */
@@ -337,7 +333,7 @@ CCResult *shiiloach_vishkin(const Graph *restrict g, const int num_threads) {
     }
 
     /* Allocate aligned parent array (π in the algorithm) for better cache performance */
-    int32_t *parents = aligned_alloc(64, sizeof(int32_t) * (size_t) num_vertices);
+    int32_t *parents = aligned_alloc(64, sizeof(int32_t) * (size_t)num_vertices);
 
     if (parents == NULL) {
         fprintf(stderr, "Error: Failed to allocate parent array\n");
@@ -386,8 +382,8 @@ CCResult *shiiloach_vishkin(const Graph *restrict g, const int num_threads) {
  * Link two vertices u and v using union-find with path compression
  * Based on the Link function from the GAP Benchmark Suite Afforest implementation
  */
-__attribute__((always_inline)) inline
-static void link_vertices(const int32_t u, const int32_t v, int32_t *restrict parents) {
+__attribute__((always_inline)) inline static void link_vertices(const int32_t u, const int32_t v,
+                                                                int32_t *restrict parents) {
     /* Read parent values */
     int32_t p1 = parents[u];
     int32_t p2 = parents[v];
@@ -399,10 +395,9 @@ static void link_vertices(const int32_t u, const int32_t v, int32_t *restrict pa
         int32_t expected = high;
 
         if ((p_high == low) || // Was already 'low'
-            (p_high == high && (__atomic_compare_exchange_n( // Succeeded on writing 'low'
-                 &parents[high], &expected, low, false,
-                 __ATOMIC_SEQ_CST,
-                 __ATOMIC_SEQ_CST)))) {
+            (p_high == high &&
+             (__atomic_compare_exchange_n( // Succeeded on writing 'low'
+                 &parents[high], &expected, low, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)))) {
             break;
         }
 
@@ -424,7 +419,8 @@ static void compress(int32_t *restrict parents, int32_t num_vertices) {
  * Parallel version of sample_frequent_element
  * Uses OpenMP to parallelize both sampling and max-finding
  */
-int32_t sample_frequent_element(const int32_t *comp, const int32_t num_vertices, const int32_t num_samples) {
+int32_t sample_frequent_element(const int32_t *comp, const int32_t num_vertices,
+                                const int32_t num_samples) {
     if (comp == NULL || num_vertices <= 0 || num_samples <= 0) {
         fprintf(stderr, "Error: Invalid parameters for sample_frequent_element\n");
         return -1;
@@ -499,7 +495,7 @@ int32_t sample_frequent_element(const int32_t *comp, const int32_t num_vertices,
     return most_frequent_id;
 }
 
-static int32_t count_unique_labels_openmp(const int32_t* labels, const int32_t num_vertices) {
+static int32_t count_unique_labels_openmp(const int32_t *labels, const int32_t num_vertices) {
     if (labels == NULL || num_vertices <= 0) {
         return -1;
     }
@@ -508,13 +504,13 @@ static int32_t count_unique_labels_openmp(const int32_t* labels, const int32_t n
     for (int32_t v = 0; v < num_vertices; v++) {
         int32_t label = labels[v];
         if (label < 0 || label >= num_vertices) {
-            fprintf(stderr, "Error: Invalid label %d at index %d (range 0-%d)\n",
-                    label, v, num_vertices - 1);
+            fprintf(stderr, "Error: Invalid label %d at index %d (range 0-%d)\n", label, v,
+                    num_vertices - 1);
             return -1;
         }
     }
 
-    bool* seen = calloc((size_t)num_vertices, sizeof(bool));
+    bool *seen = calloc((size_t)num_vertices, sizeof(bool));
     if (seen == NULL) {
         fprintf(stderr, "Error: Failed to allocate seen array\n");
         return -1;
@@ -564,7 +560,7 @@ CCResult *afforest(const Graph *restrict g, int num_threads, int32_t neighbor_ro
     }
 
     /* Allocate aligned parent array (π in the algorithm) for better cache performance */
-    int32_t *parents = aligned_alloc(64, sizeof(int32_t) * (size_t) num_vertices);
+    int32_t *parents = aligned_alloc(64, sizeof(int32_t) * (size_t)num_vertices);
 
     if (parents == NULL) {
         fprintf(stderr, "Error: Failed to allocate parent array\n");
@@ -602,7 +598,8 @@ CCResult *afforest(const Graph *restrict g, int num_threads, int32_t neighbor_ro
 #pragma omp parallel for schedule(dynamic, 2048)
     //clang-format on
     for (int32_t u = 0; u < num_vertices; u++) {
-        if (parents[u] == largest_component) continue;
+        if (parents[u] == largest_component)
+            continue;
 
         const int32_t start = g->row_ptr[u];
         const int32_t end = g->row_ptr[u + 1];

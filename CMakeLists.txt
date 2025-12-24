@@ -24,6 +24,7 @@ set(CMAKE_C_FLAGS_DEBUG "-g -O0 -DDEBUG")
 include_directories(
         inc
         inc/pthreads
+        inc/mpi
 )
 
 # Sequential version
@@ -184,4 +185,41 @@ if (Threads_FOUND)
     target_compile_definitions(cc_pthreads PRIVATE USE_PTHREADS)
 else ()
     message(WARNING "Pthreads not found - cc_pthreads target will not be built")
+endif ()
+
+# MPI parallel version
+find_package(MPI)
+if (MPI_C_FOUND)
+    message(STATUS "MPI found: ${MPI_C_VERSION}")
+    message(STATUS "MPI compiler: ${MPI_C_COMPILER}")
+    message(STATUS "MPI include path: ${MPI_C_INCLUDE_DIRS}")
+
+    # MPI parallel version
+    add_executable(cc_mpi
+            src/main.c
+            src/graph.c
+            src/mtx_reader.c
+            src/cc_common.c
+            src/cc_sequential.c
+            src/mpi/cc_mpi.c
+            benchmarks/benchmark_sequential.c
+            benchmarks/benchmark_mpi.c
+    )
+
+    # Link MPI and math library
+    target_link_libraries(cc_mpi MPI::MPI_C m)
+
+    # Add MPI-specific compiler flags and define
+    target_compile_definitions(cc_mpi PRIVATE USE_MPI)
+
+    # Optional: Enable hybrid MPI+OpenMP
+    if (OpenMP_C_FOUND)
+        target_link_libraries(cc_mpi OpenMP::OpenMP_C)
+        target_compile_options(cc_mpi PRIVATE -fopenmp)
+        target_compile_definitions(cc_mpi PRIVATE USE_OPENMP)
+        message(STATUS "MPI executable will support hybrid MPI+OpenMP")
+    endif()
+else ()
+    message(WARNING "MPI not found - cc_mpi target will not be built")
+    message(STATUS "To install MPI on Ubuntu: sudo apt-get install libopenmpi-dev openmpi-bin")
 endif ()

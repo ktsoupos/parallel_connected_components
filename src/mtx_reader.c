@@ -1,8 +1,8 @@
 #include "mtx_reader.h"
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <ctype.h>
 
 #define MAX_LINE_LENGTH 1024
 
@@ -27,7 +27,7 @@ static int32_t skip_comments(FILE *file) {
                 return -1;
             }
             /* Rewind to start of this line */
-            if (fseek(file, position - (long) strlen(line), SEEK_SET) != 0) {
+            if (fseek(file, position - (long)strlen(line), SEEK_SET) != 0) {
                 return -1;
             }
             return 0;
@@ -58,7 +58,7 @@ static bool is_symmetric_matrix(FILE *file) {
     if (fgets(line, sizeof(line), file) != NULL) {
         /* Convert to lowercase for comparison */
         for (char *p = line; *p; p++) {
-            *p = (char) tolower((unsigned char) *p);
+            *p = (char)tolower((unsigned char)*p);
         }
 
         /* Check if "symmetric" appears in header */
@@ -118,8 +118,8 @@ Graph *read_mtx_file_verbose(const char *filename, const int32_t report_interval
 
     /* For graph, rows and cols should be equal */
     if (num_rows != num_cols) {
-        fprintf(stderr, "Warning: Non-square matrix (%d x %d), using max dimension\n",
-                num_rows, num_cols);
+        fprintf(stderr, "Warning: Non-square matrix (%d x %d), using max dimension\n", num_rows,
+                num_cols);
     }
 
     const int32_t num_vertices = (num_rows > num_cols) ? num_rows : num_cols;
@@ -168,8 +168,8 @@ Graph *read_mtx_file_verbose(const char *filename, const int32_t report_interval
 
         /* Validate indices */
         if (u < 0 || u >= num_vertices || v < 0 || v >= num_vertices) {
-            fprintf(stderr, "Error: Invalid edge indices at line %d: (%d, %d)\n",
-                    i + 1, u + 1, v + 1);
+            fprintf(stderr, "Error: Invalid edge indices at line %d: (%d, %d)\n", i + 1, u + 1,
+                    v + 1);
             graph_destroy(g);
             fclose(file);
             return NULL;
@@ -187,8 +187,7 @@ Graph *read_mtx_file_verbose(const char *filename, const int32_t report_interval
 
         /* Report progress */
         if (report_interval > 0 && (edges_read % report_interval == 0)) {
-            printf("  Read %d / %d edges (%.1f%%)\n",
-                   edges_read, num_entries,
+            printf("  Read %d / %d edges (%.1f%%)\n", edges_read, num_entries,
                    100.0 * edges_read / num_entries);
         }
     }

@@ -6,10 +6,10 @@
 #include "threadpool.h"
 #include "worker.h"
 
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <pthread.h>
 #include <time.h>
 
 /* Simplified label propagation using basic pthreads (no work-stealing) */
@@ -49,8 +49,8 @@ static void *lp_iteration_thread(void *arg) {
         const int32_t *neighbors = graph_get_neighbors(args->g, v, &num_neighbors);
 
         for (int32_t i = 0; i < num_neighbors; i++) {
-            int32_t neighbor_label = atomic_load_explicit(&args->labels[neighbors[i]],
-                                                          memory_order_acquire);
+            int32_t neighbor_label =
+                atomic_load_explicit(&args->labels[neighbors[i]], memory_order_acquire);
             if (neighbor_label < min_label) {
                 min_label = neighbor_label;
             }
@@ -192,10 +192,10 @@ CCResult *label_propagation_sync_pthreads(const Graph *g, int32_t num_threads) {
 /* ============ ASYNC LABEL PROPAGATION WITH WORK-STEALING ============ */
 
 /* Subdivision threshold: if a chunk has more vertices than this, subdivide it */
-#define SUBDIVISION_THRESHOLD 8192  /* Increased to reduce subdivision on large graphs */
+#define SUBDIVISION_THRESHOLD 8192 /* Increased to reduce subdivision on large graphs */
 
 /* Maximum subdivisions per worker */
-#define MAX_SUBDIVISIONS_PER_WORKER 2048  /* Reduced to catch issues earlier */
+#define MAX_SUBDIVISIONS_PER_WORKER 2048 /* Reduced to catch issues earlier */
 
 typedef struct AsyncLPContext {
     const Graph *g;
@@ -238,8 +238,8 @@ static void process_chunk_once(Task *task) {
 
         /* Allocate from per-worker pool (NO MALLOC!) */
         const int32_t worker_id = self->id;
-        int32_t alloc_idx = atomic_fetch_add_explicit(
-            &ctx->worker_alloc_counters[worker_id], 1, memory_order_relaxed);
+        int32_t alloc_idx = atomic_fetch_add_explicit(&ctx->worker_alloc_counters[worker_id], 1,
+                                                      memory_order_relaxed);
 
         if (alloc_idx >= MAX_SUBDIVISIONS_PER_WORKER) {
             /* Pool exhausted - fallback to sequential */
@@ -289,8 +289,8 @@ process_sequentially:
         const int32_t *neighbors = graph_get_neighbors(ctx->g, v, &num_neighbors);
 
         for (int32_t i = 0; i < num_neighbors; i++) {
-            int32_t neighbor_label = atomic_load_explicit(&ctx->labels[neighbors[i]],
-                                                          memory_order_acquire);
+            int32_t neighbor_label =
+                atomic_load_explicit(&ctx->labels[neighbors[i]], memory_order_acquire);
             if (neighbor_label < min_label) {
                 min_label = neighbor_label;
             }
@@ -488,8 +488,8 @@ CCResult *label_propagation_async_pthreads(const Graph *g, int32_t num_threads) 
 
                 if (!deque_push_bottom(&worker->deque, &task_pool[chunk_id])) {
                     atomic_fetch_sub_explicit(&pool->active_tasks, 1, memory_order_acq_rel);
-                    fprintf(stderr, "ERROR: Deque full (chunk %d, iteration %d)\n",
-                            chunk_id, num_iterations);
+                    fprintf(stderr, "ERROR: Deque full (chunk %d, iteration %d)\n", chunk_id,
+                            num_iterations);
                     goto cleanup_and_exit;
                 }
             }

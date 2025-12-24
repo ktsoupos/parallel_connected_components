@@ -1,8 +1,8 @@
 #include "cc_sequential.h"
 #include "cc_common.h"
-#include <stdlib.h>
-#include <stdio.h>
 #include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 CCResult *label_propagation_min(const Graph *restrict g) {
     /* Check arguments */
@@ -25,7 +25,7 @@ CCResult *label_propagation_min(const Graph *restrict g) {
     }
 
     /* Allocate labels array */
-    result->labels = malloc(sizeof(int32_t) * (size_t) num_vertices);
+    result->labels = malloc(sizeof(int32_t) * (size_t)num_vertices);
     if (result->labels == NULL) {
         fprintf(stderr, "Error: Failed to allocate labels array\n");
         free(result);
@@ -36,11 +36,12 @@ CCResult *label_propagation_min(const Graph *restrict g) {
     int32_t *restrict labels = result->labels;
 
     /* Allocate temporary arrays in single block for better performance */
-    const size_t queue_size_bytes = sizeof(int32_t) * (size_t) num_vertices;
-    const size_t bool_size_bytes = sizeof(bool) * (size_t) num_vertices;
+    const size_t queue_size_bytes = sizeof(int32_t) * (size_t)num_vertices;
+    const size_t bool_size_bytes = sizeof(bool) * (size_t)num_vertices;
 
     /* Ensure proper alignment: round up bool_size to multiple of int32_t alignment */
-    const size_t bool_size_aligned = ((bool_size_bytes + sizeof(int32_t) - 1) / sizeof(int32_t)) * sizeof(int32_t);
+    const size_t bool_size_aligned =
+        ((bool_size_bytes + sizeof(int32_t) - 1) / sizeof(int32_t)) * sizeof(int32_t);
     const size_t total_bytes = (2 * queue_size_bytes) + bool_size_aligned;
 
     void *temp_memory = malloc(total_bytes);
@@ -53,9 +54,9 @@ CCResult *label_propagation_min(const Graph *restrict g) {
 
     /* Partition the single block into three arrays using pointer arithmetic
      * Using pointer arithmetic avoids alignment warnings and is cleaner */
-    int32_t *queue = (int32_t *) temp_memory;
+    int32_t *queue = (int32_t *)temp_memory;
     int32_t *next_queue = queue + num_vertices; /* Advance by num_vertices int32_t elements */
-    bool *in_queue = (bool *) (next_queue + num_vertices); /* Advance by another num_vertices */
+    bool *in_queue = (bool *)(next_queue + num_vertices); /* Advance by another num_vertices */
 
     /* Keep original pointer for cleanup (since we swap queue pointers in the loop) */
     void *temp_memory_orig = temp_memory;
@@ -87,8 +88,8 @@ CCResult *label_propagation_min(const Graph *restrict g) {
 #ifdef DEBUG
             /* Bounds check vertex from queue (debug only) */
             if ((v < 0) || (v >= num_vertices)) {
-                fprintf(stderr, "Error: Invalid vertex %d in queue (range: 0-%d)\n",
-                        v, num_vertices - 1);
+                fprintf(stderr, "Error: Invalid vertex %d in queue (range: 0-%d)\n", v,
+                        num_vertices - 1);
                 free(temp_memory_orig);
                 free(result->labels);
                 free(result);
@@ -111,8 +112,9 @@ CCResult *label_propagation_min(const Graph *restrict g) {
 #ifdef DEBUG
                 /* Bounds check to prevent heap corruption (debug only) */
                 if ((u < 0) || (u >= num_vertices)) {
-                    fprintf(stderr, "Error: Invalid neighbor index %d for vertex %d (range: 0-%d)\n",
-                            u, v, num_vertices - 1);
+                    fprintf(stderr,
+                            "Error: Invalid neighbor index %d for vertex %d (range: 0-%d)\n", u, v,
+                            num_vertices - 1);
                     free(temp_memory_orig);
                     free(result->labels);
                     free(result);
@@ -195,7 +197,7 @@ CCResult *label_propagation_min_simple(const Graph *restrict g) {
     }
 
     /* Allocate labels array */
-    result->labels = malloc(sizeof(int32_t) * (size_t) num_vertices);
+    result->labels = malloc(sizeof(int32_t) * (size_t)num_vertices);
     if (result->labels == NULL) {
         fprintf(stderr, "Error: Failed to allocate labels array\n");
         free(result);
@@ -262,8 +264,8 @@ CCResult *label_propagation_min_simple(const Graph *restrict g) {
 static int32_t uf_find(int32_t *restrict parent, int32_t x) {
     while (parent[x] != x) {
         const int32_t next = parent[x];
-        parent[x] = parent[next];  /* Point to grandparent */
-        x = next;  /* Move to original parent */
+        parent[x] = parent[next]; /* Point to grandparent */
+        x = next;                 /* Move to original parent */
     }
     return x;
 }
@@ -289,7 +291,7 @@ CCResult *union_find_cc(const Graph *restrict g) {
     }
 
     /* Allocate parent array */
-    int32_t *parent = malloc(sizeof(int32_t) * (size_t) num_vertices);
+    int32_t *parent = malloc(sizeof(int32_t) * (size_t)num_vertices);
 
     if (parent == NULL) {
         fprintf(stderr, "Error: Failed to allocate parent array\n");
@@ -332,7 +334,7 @@ CCResult *union_find_cc(const Graph *restrict g) {
     }
 
     /* Allocate labels array */
-    result->labels = malloc(sizeof(int32_t) * (size_t) num_vertices);
+    result->labels = malloc(sizeof(int32_t) * (size_t)num_vertices);
     if (result->labels == NULL) {
         fprintf(stderr, "Error: Failed to allocate labels array\n");
         free(parent);
@@ -386,7 +388,7 @@ CCResult *union_find_cc_edge_reorder(const Graph *restrict g) {
     }
 
     /* Allocate parent array */
-    int32_t *parent = malloc(sizeof(int32_t) * (size_t) num_vertices);
+    int32_t *parent = malloc(sizeof(int32_t) * (size_t)num_vertices);
 
     if (parent == NULL) {
         fprintf(stderr, "Error: Failed to allocate parent array\n");
@@ -413,7 +415,7 @@ CCResult *union_find_cc_edge_reorder(const Graph *restrict g) {
 
         for (int32_t j = 0; j < num_neighbors; j++) {
             const int32_t u = neighbors[j];
-            if (u > v) {  /* Only process if u > v */
+            if (u > v) { /* Only process if u > v */
                 const int32_t root_u = uf_find(parent, u);
                 if (root_v != root_u) {
                     if (root_v < root_u) {
@@ -428,7 +430,7 @@ CCResult *union_find_cc_edge_reorder(const Graph *restrict g) {
     }
 
     /* Allocate labels array */
-    result->labels = malloc(sizeof(int32_t) * (size_t) num_vertices);
+    result->labels = malloc(sizeof(int32_t) * (size_t)num_vertices);
     if (result->labels == NULL) {
         fprintf(stderr, "Error: Failed to allocate labels array\n");
         free(parent);

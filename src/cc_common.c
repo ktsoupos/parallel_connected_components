@@ -1,15 +1,15 @@
 #include "cc_common.h"
 
 #include <stdbool.h>
-#include <stdlib.h>
 #include <stdio.h>
+#include <stdlib.h>
 
-int32_t count_unique_labels(const int32_t* labels, const int32_t num_vertices) {
+int32_t count_unique_labels(const int32_t *labels, const int32_t num_vertices) {
     if (labels == NULL || num_vertices <= 0) {
         return -1;
     }
 
-    bool* seen = calloc((size_t)num_vertices, sizeof(bool));
+    bool *seen = calloc((size_t)num_vertices, sizeof(bool));
     if (seen == NULL) {
         fprintf(stderr, "Error: Failed to allocate seen array\n");
         return -1;
@@ -21,8 +21,8 @@ int32_t count_unique_labels(const int32_t* labels, const int32_t num_vertices) {
 
         /* Bounds check to prevent heap corruption */
         if (label < 0 || label >= num_vertices) {
-            fprintf(stderr, "Error: Invalid label %d for vertex %d (range: 0-%d)\n",
-                    label, v, num_vertices - 1);
+            fprintf(stderr, "Error: Invalid label %d for vertex %d (range: 0-%d)\n", label, v,
+                    num_vertices - 1);
             free(seen);
             return -1;
         }
@@ -37,14 +37,14 @@ int32_t count_unique_labels(const int32_t* labels, const int32_t num_vertices) {
     return count;
 }
 
-void print_component_stats(const int32_t* labels, const int32_t num_vertices) {
+void print_component_stats(const int32_t *labels, const int32_t num_vertices) {
     if (labels == NULL || num_vertices <= 0) {
         fprintf(stderr, "Error: Invalid parameters\n");
         return;
     }
 
     /* Count size of each component */
-    int32_t* component_sizes = calloc((size_t)num_vertices, sizeof(int32_t));
+    int32_t *component_sizes = calloc((size_t)num_vertices, sizeof(int32_t));
     if (component_sizes == NULL) {
         fprintf(stderr, "Error: Failed to allocate component sizes array\n");
         return;
@@ -92,5 +92,3 @@ void print_component_stats(const int32_t* labels, const int32_t num_vertices) {
 
     free(component_sizes);
 }
-
-

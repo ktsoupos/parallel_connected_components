@@ -9,4 +9,4 @@
  * @param num_workers Number of Cilk workers to use
  * @return 0 on success, -1 on failure
  */
-int run_opencilk_benchmarks(const Graph* g, int num_workers);
+int run_opencilk_benchmarks(const Graph *g, int num_workers);

@@ -1,7 +1,7 @@
 #pragma once
 
-#include "graph.h"
 #include "cc_sequential.h"
+#include "graph.h"
 #include <stdint.h>
 
 /**
@@ -14,7 +14,7 @@
  *
  * Returns: CCResult with labels and iteration count, or NULL on error
  */
-CCResult* label_propagation_sync_pthreads(const Graph* g, int32_t num_threads);
+CCResult *label_propagation_sync_pthreads(const Graph *g, int32_t num_threads);
 
 /**
  * Asynchronous label propagation using work-stealing threadpool
@@ -25,7 +25,7 @@ CCResult* label_propagation_sync_pthreads(const Graph* g, int32_t num_threads);
  *
  * Returns: CCResult with labels (num_iterations = 0 for async), or NULL on error
  */
-CCResult* label_propagation_async_pthreads(const Graph* g, int32_t num_threads);
+CCResult *label_propagation_async_pthreads(const Graph *g, int32_t num_threads);
 
 /**
  * Afforest - Lock-free parallel connected components (FASTEST)
@@ -36,5 +36,4 @@ CCResult* label_propagation_async_pthreads(const Graph* g, int32_t num_threads);
  * @param neighbor_rounds: Number of sampling rounds (default 2 if <= 0)
  * Returns: CCResult with labels and iteration count, or NULL on error
  */
-CCResult* afforest_pthreads(const Graph* g, int32_t num_threads, int32_t neighbor_rounds);
-
+CCResult *afforest_pthreads(const Graph *g, int32_t num_threads, int32_t neighbor_rounds);
