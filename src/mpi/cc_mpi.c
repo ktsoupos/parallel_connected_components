@@ -1792,4 +1792,552 @@ CCResult *mpi_label_propagation_async(const DistributedGraph *dg) {
     return result;
 }
 
+/* ============ MPI UNION-FIND CONNECTED COMPONENTS ============ */
+
+/**
+ * Union-Find structure for distributed algorithm
+ * Stores parent pointers and ranks for local vertices only
+ */
+typedef struct {
+    int32_t *parent;      // Parent pointers (stores GLOBAL vertex IDs)
+    int32_t *rank;        // Union-by-rank
+    int32_t local_n;      // Number of local vertices
+    int32_t local_start;  // Global ID of first local vertex
+} UnionFind;
+
+/**
+ * Update message for Union-Find
+ * Sent to remote processes to propagate component information
+ */
+typedef struct {
+    int32_t vertex;       // Global vertex ID to update
+    int32_t component;    // Component root (global vertex ID)
+} UFUpdate;
+
+/**
+ * Initialize Union-Find structure
+ */
+static int init_union_find(UnionFind *uf, int32_t local_n, int32_t local_start) {
+    uf->local_n = local_n;
+    uf->local_start = local_start;
+
+    uf->parent = malloc(sizeof(int32_t) * (size_t)local_n);
+    uf->rank = malloc(sizeof(int32_t) * (size_t)local_n);
+
+    if (!uf->parent || !uf->rank) {
+        free(uf->parent);
+        free(uf->rank);
+        return -1;
+    }
+
+    /* Initialize: each vertex is its own parent */
+    for (int32_t i = 0; i < local_n; i++) {
+        uf->parent[i] = local_start + i;  /* Global ID */
+        uf->rank[i] = 0;
+    }
+
+    return 0;
+}
+
+/**
+ * Free Union-Find structure
+ */
+static void free_union_find(UnionFind *uf) {
+    free(uf->parent);
+    free(uf->rank);
+}
+
+/**
+ * Find operation with path halving
+ * Path halving: make each vertex point to its grandparent during traversal
+ * Achieves O(log n) amortized time with single-pass updates
+ * Returns local index of root
+ */
+static int32_t uf_find(UnionFind *uf, int32_t x_local) {
+    int32_t current = x_local;
+
+    /* Path halving: iteratively follow parent pointers, halving path length */
+    while (1) {
+        int32_t parent_global = uf->parent[current];
+
+        /* Check if parent is remote (outside local range) */
+        if (parent_global < uf->local_start ||
+            parent_global >= uf->local_start + uf->local_n) {
+            /* Parent is remote, current is a local root pointing to remote component */
+            return current;
+        }
+
+        int32_t parent_local = parent_global - uf->local_start;
+
+        /* Check if we've reached the root */
+        if (parent_local == current) {
+            return current;
+        }
+
+        /* Path halving: get grandparent */
+        int32_t grandparent_global = uf->parent[parent_local];
+
+        /* Check if grandparent is remote */
+        if (grandparent_global < uf->local_start ||
+            grandparent_global >= uf->local_start + uf->local_n) {
+            /* Grandparent is remote, parent is the local root */
+            return parent_local;
+        }
+
+        /* Point current to grandparent (path halving) */
+        uf->parent[current] = grandparent_global;
+
+        /* Move to parent for next iteration */
+        current = parent_local;
+    }
+}
+
+/**
+ * Union operation with union-by-rank and deterministic tie-breaking
+ * Links larger root IDs to smaller ones for deterministic convergence
+ * x_local and y_local are LOCAL indices
+ * Returns 1 if union was performed, 0 otherwise
+ */
+static int uf_union(UnionFind *uf, int32_t x_local, int32_t y_local) {
+    int32_t root_x_local = uf_find(uf, x_local);
+    int32_t root_y_local = uf_find(uf, y_local);
+
+    /* Get global IDs of roots */
+    int32_t root_x_global = uf->parent[root_x_local];
+    int32_t root_y_global = uf->parent[root_y_local];
+
+    if (root_x_global == root_y_global) {
+        return 0;  /* Already in same set */
+    }
+
+    /* Union by rank with deterministic tie-breaking using global IDs */
+    if (uf->rank[root_x_local] < uf->rank[root_y_local]) {
+        uf->parent[root_x_local] = root_y_global;
+    } else if (uf->rank[root_x_local] > uf->rank[root_y_local]) {
+        uf->parent[root_y_local] = root_x_global;
+    } else {
+        /* Equal rank: link larger ID to smaller ID for deterministic convergence */
+        if (root_x_global < root_y_global) {
+            uf->parent[root_y_local] = root_x_global;
+        } else {
+            uf->parent[root_x_local] = root_y_global;
+        }
+        /* Only increment rank if we modified a local root */
+        if (root_x_global < root_y_global) {
+            uf->rank[root_x_local]++;
+        } else {
+            uf->rank[root_y_local]++;
+        }
+    }
+
+    return 1;
+}
+
+/**
+ * Apply remote update to Union-Find structure
+ * Merges local component with remote component
+ */
+static int apply_update(UnionFind *uf, int32_t vertex_global, int32_t component_global) {
+    /* Verify vertex is local */
+    if (vertex_global < uf->local_start ||
+        vertex_global >= uf->local_start + uf->local_n) {
+        return 0;  /* Not our vertex */
+    }
+
+    int32_t v_local = vertex_global - uf->local_start;
+    int32_t root_v_local = uf_find(uf, v_local);
+    int32_t root_v_global = uf->parent[root_v_local];
+
+    if (root_v_global == component_global) {
+        return 0;  /* Already in same component */
+    }
+
+    /* Merge: choose smaller global ID as canonical root */
+    if (component_global < root_v_global) {
+        uf->parent[root_v_local] = component_global;
+        return 1;
+    }
+
+    /* If our root is smaller, remote side will update in next iteration */
+    return 0;
+}
+
+/**
+ * Dynamic update queue
+ */
+typedef struct {
+    UFUpdate *data;
+    int32_t size;
+    int32_t capacity;
+} UFUpdateQueue;
+
+static int init_uf_queue(UFUpdateQueue *q) {
+    q->capacity = 1024;
+    q->size = 0;
+    q->data = malloc(sizeof(UFUpdate) * (size_t)q->capacity);
+    return q->data ? 0 : -1;
+}
+
+static void add_uf_update(UFUpdateQueue *q, int32_t vertex, int32_t component) {
+    if (q->size >= q->capacity) {
+        q->capacity *= 2;
+        UFUpdate *new_data = realloc(q->data, sizeof(UFUpdate) * (size_t)q->capacity);
+        if (!new_data) {
+            fprintf(stderr, "Error: Failed to resize update queue\n");
+            return;
+        }
+        q->data = new_data;
+    }
+
+    q->data[q->size].vertex = vertex;
+    q->data[q->size].component = component;
+    q->size++;
+}
+
+static void free_uf_queue(UFUpdateQueue *q) {
+    free(q->data);
+    q->data = NULL;
+    q->size = 0;
+    q->capacity = 0;
+}
+
+/**
+ * MPI Union-Find Connected Components
+ *
+ * Distributed Union-Find algorithm:
+ * 1. Each process owns a contiguous range of vertices
+ * 2. Process local edges immediately
+ * 3. Queue updates for remote edges
+ * 4. Exchange updates with MPI_Alltoallv
+ * 5. Apply received updates
+ * 6. Repeat until convergence
+ *
+ * @param dg - Distributed graph structure
+ * @return CCResult with component labels, or NULL on error
+ */
+CCResult *mpi_union_find_cc(const DistributedGraph *dg) {
+    if (dg == NULL) {
+        fprintf(stderr, "Error: NULL DistributedGraph pointer\n");
+        return NULL;
+    }
+
+    const int rank = dg->rank;
+    const int num_ranks = dg->num_ranks;
+    const int32_t g_num_vertices = dg->g_num_vertices;
+    const int32_t l_num_vertices = dg->l_num_vertices;
+    const int32_t vertex_offset = dg->vertex_offset;
+
+    /* Allocate result structure */
+    CCResult *result = malloc(sizeof(CCResult));
+    if (!result) {
+        fprintf(stderr, "Rank %d: Failed to allocate CCResult\n", rank);
+        return NULL;
+    }
+
+    /* Initialize Union-Find */
+    UnionFind uf;
+    if (init_union_find(&uf, l_num_vertices, vertex_offset) != 0) {
+        fprintf(stderr, "Rank %d: Failed to initialize Union-Find\n", rank);
+        free(result);
+        return NULL;
+    }
+
+    /* Create MPI datatype for updates */
+    MPI_Datatype MPI_UFUPDATE;
+    MPI_Type_contiguous(2, MPI_INT32_T, &MPI_UFUPDATE);
+    MPI_Type_commit(&MPI_UFUPDATE);
+
+    /* Timing breakdown variables */
+    double time_local_processing = 0.0;
+    double time_mpi_alltoallv = 0.0;
+    double time_other_mpi = 0.0;
+
+    /* Main iteration loop */
+    result->num_iterations = 0;
+    int converged = 0;
+    const int32_t verts_per_proc = g_num_vertices / num_ranks;
+
+    while (!converged && result->num_iterations < 1000) {
+        result->num_iterations++;
+        int32_t local_changes = 0;
+        double iter_start = MPI_Wtime();
+
+        /* Allocate update queues (one per process) */
+        UFUpdateQueue *send_queues = malloc(sizeof(UFUpdateQueue) * (size_t)num_ranks);
+        if (!send_queues) {
+            fprintf(stderr, "Rank %d: Failed to allocate send queues\n", rank);
+            free_union_find(&uf);
+            free(result);
+            MPI_Type_free(&MPI_UFUPDATE);
+            return NULL;
+        }
+
+        for (int p = 0; p < num_ranks; p++) {
+            if (init_uf_queue(&send_queues[p]) != 0) {
+                for (int j = 0; j < p; j++) {
+                    free_uf_queue(&send_queues[j]);
+                }
+                free(send_queues);
+                free_union_find(&uf);
+                free(result);
+                MPI_Type_free(&MPI_UFUPDATE);
+                return NULL;
+            }
+        }
+
+        /* PHASE 1: Process edges and build update queues */
+        double phase_start = MPI_Wtime();
+
+        for (int32_t i = 0; i < l_num_vertices; i++) {
+            int32_t u_global = vertex_offset + i;
+            int32_t root_u_local = uf_find(&uf, i);
+            int32_t root_u_global = uf.parent[root_u_local];
+
+            /* Process all edges of this vertex */
+            for (int32_t e = dg->local_row_ptr[i]; e < dg->local_row_ptr[i + 1]; e++) {
+                int32_t v_global = dg->local_col_idx[e];
+
+                /* Skip self-loops */
+                if (v_global == u_global) continue;
+
+                /* Check if v is local or remote */
+                if (v_global >= vertex_offset &&
+                    v_global < vertex_offset + l_num_vertices) {
+                    /* Local edge - process immediately */
+                    int32_t v_local = v_global - vertex_offset;
+                    if (uf_union(&uf, root_u_local, v_local)) {
+                        local_changes++;
+                    }
+                } else {
+                    /* Remote edge - queue update for owner */
+                    int owner = v_global / verts_per_proc;
+                    if (owner >= num_ranks) owner = num_ranks - 1;
+
+                    if (owner >= 0 && owner < num_ranks) {
+                        add_uf_update(&send_queues[owner], v_global, root_u_global);
+                    }
+                }
+            }
+        }
+
+        time_local_processing += MPI_Wtime() - phase_start;
+
+        /* PHASE 2: Exchange update counts */
+        phase_start = MPI_Wtime();
+        int32_t *send_counts = malloc(sizeof(int32_t) * (size_t)num_ranks);
+        int32_t *recv_counts = malloc(sizeof(int32_t) * (size_t)num_ranks);
+        int32_t *send_displs = malloc(sizeof(int32_t) * (size_t)num_ranks);
+        int32_t *recv_displs = malloc(sizeof(int32_t) * (size_t)num_ranks);
+
+        if (!send_counts || !recv_counts || !send_displs || !recv_displs) {
+            fprintf(stderr, "Rank %d: Failed to allocate communication arrays\n", rank);
+            for (int p = 0; p < num_ranks; p++) {
+                free_uf_queue(&send_queues[p]);
+            }
+            free(send_queues);
+            free(send_counts);
+            free(recv_counts);
+            free(send_displs);
+            free(recv_displs);
+            free_union_find(&uf);
+            free(result);
+            MPI_Type_free(&MPI_UFUPDATE);
+            return NULL;
+        }
+
+        for (int p = 0; p < num_ranks; p++) {
+            send_counts[p] = send_queues[p].size;
+        }
+
+        MPI_Alltoall(send_counts, 1, MPI_INT32_T,
+                     recv_counts, 1, MPI_INT32_T, dg->comm);
+
+        time_other_mpi += MPI_Wtime() - phase_start;
+
+        /* Calculate displacements */
+        send_displs[0] = 0;
+        recv_displs[0] = 0;
+        for (int p = 1; p < num_ranks; p++) {
+            send_displs[p] = send_displs[p - 1] + send_counts[p - 1];
+            recv_displs[p] = recv_displs[p - 1] + recv_counts[p - 1];
+        }
+
+        int32_t total_send = (num_ranks > 0) ?
+            send_displs[num_ranks - 1] + send_counts[num_ranks - 1] : 0;
+        int32_t total_recv = (num_ranks > 0) ?
+            recv_displs[num_ranks - 1] + recv_counts[num_ranks - 1] : 0;
+
+        /* Flatten send queues into single buffer */
+        UFUpdate *send_buffer = malloc(sizeof(UFUpdate) * (size_t)(total_send > 0 ? total_send : 1));
+        UFUpdate *recv_buffer = malloc(sizeof(UFUpdate) * (size_t)(total_recv > 0 ? total_recv : 1));
+
+        if (!send_buffer || !recv_buffer) {
+            fprintf(stderr, "Rank %d: Failed to allocate transfer buffers\n", rank);
+            free(send_buffer);
+            free(recv_buffer);
+            for (int p = 0; p < num_ranks; p++) {
+                free_uf_queue(&send_queues[p]);
+            }
+            free(send_queues);
+            free(send_counts);
+            free(recv_counts);
+            free(send_displs);
+            free(recv_displs);
+            free_union_find(&uf);
+            free(result);
+            MPI_Type_free(&MPI_UFUPDATE);
+            return NULL;
+        }
+
+        int32_t offset = 0;
+        for (int p = 0; p < num_ranks; p++) {
+            for (int32_t j = 0; j < send_queues[p].size; j++) {
+                send_buffer[offset++] = send_queues[p].data[j];
+            }
+        }
+
+        /* PHASE 3: Exchange updates */
+        phase_start = MPI_Wtime();
+
+        MPI_Alltoallv(send_buffer, send_counts, send_displs, MPI_UFUPDATE,
+                      recv_buffer, recv_counts, recv_displs, MPI_UFUPDATE,
+                      dg->comm);
+
+        time_mpi_alltoallv += MPI_Wtime() - phase_start;
+
+        /* PHASE 4: Apply received updates */
+        phase_start = MPI_Wtime();
+        for (int32_t i = 0; i < total_recv; i++) {
+            if (apply_update(&uf, recv_buffer[i].vertex, recv_buffer[i].component)) {
+                local_changes++;
+            }
+        }
+
+        time_local_processing += MPI_Wtime() - phase_start;
+
+        /* Cleanup iteration resources */
+        for (int p = 0; p < num_ranks; p++) {
+            free_uf_queue(&send_queues[p]);
+        }
+        free(send_queues);
+        free(send_counts);
+        free(recv_counts);
+        free(send_displs);
+        free(recv_displs);
+        free(send_buffer);
+        free(recv_buffer);
+
+        /* PHASE 5: Check convergence */
+        phase_start = MPI_Wtime();
+
+        int32_t global_changes = 0;
+        MPI_Allreduce(&local_changes, &global_changes, 1, MPI_INT32_T,
+                      MPI_SUM, dg->comm);
+
+        time_other_mpi += MPI_Wtime() - phase_start;
+
+        converged = (global_changes == 0);
+
+        /* Progress logging */
+        if (rank == 0 && (result->num_iterations % 10 == 0 || converged)) {
+            printf("UF Iteration %d: %d changes\n",
+                   result->num_iterations, global_changes);
+            fflush(stdout);
+        }
+    }
+
+    if (rank == 0 && result->num_iterations >= 1000) {
+        printf("Warning: Union-Find reached max iterations (1000)\n");
+        fflush(stdout);
+    }
+
+    /* Final path compression */
+    for (int32_t i = 0; i < l_num_vertices; i++) {
+        uf_find(&uf, i);
+    }
+
+    /* Gather all labels to rank 0 */
+    int32_t *all_labels = NULL;
+    if (rank == 0) {
+        all_labels = malloc(sizeof(int32_t) * (size_t)g_num_vertices);
+        if (!all_labels) {
+            fprintf(stderr, "Rank %d: Failed to allocate all_labels\n", rank);
+            free_union_find(&uf);
+            free(result);
+            MPI_Type_free(&MPI_UFUPDATE);
+            return NULL;
+        }
+    }
+
+    /* Prepare gather parameters */
+    int32_t *recvcounts = NULL;
+    int32_t *displs = NULL;
+    if (rank == 0) {
+        recvcounts = malloc(sizeof(int32_t) * (size_t)num_ranks);
+        displs = malloc(sizeof(int32_t) * (size_t)num_ranks);
+
+        if (!recvcounts || !displs) {
+            fprintf(stderr, "Rank %d: Failed to allocate gather arrays\n", rank);
+            free(all_labels);
+            free(recvcounts);
+            free(displs);
+            free_union_find(&uf);
+            free(result);
+            MPI_Type_free(&MPI_UFUPDATE);
+            return NULL;
+        }
+
+        for (int r = 0; r < num_ranks; r++) {
+            displs[r] = r * verts_per_proc;
+            recvcounts[r] = (r == num_ranks - 1)
+                            ? (g_num_vertices - displs[r])
+                            : verts_per_proc;
+        }
+    }
+
+    MPI_Gatherv(uf.parent, l_num_vertices, MPI_INT32_T,
+                all_labels, recvcounts, displs, MPI_INT32_T,
+                0, dg->comm);
+
+    /* Count components on rank 0 */
+    if (rank == 0) {
+        result->labels = all_labels;
+        result->num_components = count_unique_labels(all_labels, g_num_vertices);
+        free(recvcounts);
+        free(displs);
+
+        /* Print timing breakdown (matching report section 4.5) */
+        double total_time = time_local_processing + time_mpi_alltoallv + time_other_mpi;
+        if (total_time > 0.001) {  /* Only print for non-trivial runs */
+            printf("\n=== UF Communication Breakdown ===\n");
+            printf("%-30s %10.5f s (%5.1f%%)\n",
+                   "Local Edge Processing",
+                   time_local_processing,
+                   100.0 * time_local_processing / total_time);
+            printf("%-30s %10.5f s (%5.1f%%)\n",
+                   "MPI_Alltoallv (updates)",
+                   time_mpi_alltoallv,
+                   100.0 * time_mpi_alltoallv / total_time);
+            printf("%-30s %10.5f s (%5.1f%%)\n",
+                   "Other MPI Operations",
+                   time_other_mpi,
+                   100.0 * time_other_mpi / total_time);
+            printf("%-30s %10.5f s (%5.1f%%)\n",
+                   "Total",
+                   total_time,
+                   100.0);
+            fflush(stdout);
+        }
+    } else {
+        result->labels = NULL;
+        result->num_components = 0;
+    }
+
+    /* Cleanup */
+    free_union_find(&uf);
+    MPI_Type_free(&MPI_UFUPDATE);
+
+    return result;
+}
+
 

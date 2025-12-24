@@ -259,6 +259,56 @@ int run_mpi_benchmarks(const Graph *g) {
         printf("  Speedup vs MPI LP Optimized: %.2fx\n", elapsed_mpi_lp_opt / elapsed_mpi_lp_async);
     }
 
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    /* MPI Union-Find */
+    if (rank == 0) {
+        printf("\n=== MPI Union-Find Connected Components ===\n");
+        fflush(stdout);
+    }
+
+    const double start_uf = MPI_Wtime();
+    CCResult *result_mpi_uf = mpi_union_find_cc(dist_graph);
+    const double end_uf = MPI_Wtime();
+
+    if (result_mpi_uf == NULL) {
+        fprintf(stderr, "Rank %d: Error in MPI Union-Find algorithm\n", rank);
+        cc_result_destroy(result_mpi_lp);
+        cc_result_destroy(result_mpi_lp_simple);
+        cc_result_destroy(result_mpi_lp_opt);
+        cc_result_destroy(result_mpi_lp_async);
+        free(dist_graph->local_row_ptr);
+        free(dist_graph->local_col_idx);
+        free(dist_graph->ghost_global_ids);
+        free(dist_graph->ghost_to_owner);
+        free(dist_graph->ghost_labels);
+        free(dist_graph->send_counts);
+        free(dist_graph->recv_counts);
+        free(dist_graph->send_displs);
+        free(dist_graph->recv_displs);
+        for (int r = 0; r < num_ranks; r++) {
+            free(dist_graph->send_vertices[r]);
+        }
+        free(dist_graph->send_vertices);
+        free(dist_graph);
+        if (rank == 0) {
+            if (result_seq_uf != NULL) cc_result_destroy(result_seq_uf);
+            if (result_seq_lp != NULL) cc_result_destroy(result_seq_lp);
+        }
+        return -1;
+    }
+
+    const double elapsed_mpi_uf = end_uf - start_uf;
+
+    if (rank == 0) {
+        printf("MPI Union-Find completed in %.5f seconds\n", elapsed_mpi_uf);
+        printf("  Components: %d\n", result_mpi_uf->num_components);
+        printf("  Iterations: %d\n", result_mpi_uf->num_iterations);
+        printf("  Speedup vs Sequential LP: %.2fx\n", elapsed_seq_lp / elapsed_mpi_uf);
+        printf("  Speedup vs Sequential UF: %.2fx\n", elapsed_seq_uf / elapsed_mpi_uf);
+        printf("  Speedup vs MPI LP (basic): %.2fx\n", elapsed_mpi_lp / elapsed_mpi_uf);
+    }
+
     /* Performance Summary */
     if (rank == 0) {
         printf("\n=== MPI Performance Summary ===\n");
@@ -280,6 +330,9 @@ int run_mpi_benchmarks(const Graph *g) {
         printf("%-45s %12.5f %12d %12.2fx\n",
                "MPI LP Fully Async (Ghost+MPI_Testsome)", elapsed_mpi_lp_async, result_mpi_lp_async->num_components,
                elapsed_seq_uf / elapsed_mpi_lp_async);
+        printf("%-45s %12.5f %12d %12.2fx\n",
+               "MPI Union-Find (Alltoallv)", elapsed_mpi_uf, result_mpi_uf->num_components,
+               elapsed_seq_uf / elapsed_mpi_uf);
     }
 
     /* Cleanup */
@@ -291,6 +344,7 @@ int run_mpi_benchmarks(const Graph *g) {
     cc_result_destroy(result_mpi_lp_simple);
     cc_result_destroy(result_mpi_lp_opt);
     cc_result_destroy(result_mpi_lp_async);
+    cc_result_destroy(result_mpi_uf);
 
     /* Free distributed graph and ghost structures */
     free(dist_graph->local_row_ptr);

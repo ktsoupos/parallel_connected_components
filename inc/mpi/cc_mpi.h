@@ -91,3 +91,18 @@ CCResult *mpi_label_propagation_optimized(const DistributedGraph *dg);
  * @return CCResult with component labels (rank 0 only), or NULL on error
  */
 CCResult *mpi_label_propagation_async(const DistributedGraph *dg);
+
+/**
+ * MPI Union-Find Connected Components
+ *
+ * Distributed Union-Find algorithm with:
+ * - 1D row-wise partitioning (each process owns contiguous vertices)
+ * - Ownership model (only owner can modify vertex parent)
+ * - Batched communication (MPI_Alltoallv for updates)
+ * - Synchronous iterations with convergence checking
+ * - Path compression after convergence
+ *
+ * @param dg - Distributed graph structure
+ * @return CCResult with component labels (rank 0 only), or NULL on error
+ */
+CCResult *mpi_union_find_cc(const DistributedGraph *dg);
