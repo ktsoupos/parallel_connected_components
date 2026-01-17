@@ -2,13 +2,17 @@
 
 #include "graph.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /**
  * Run all sequential connected components algorithms and compare performance
  * Returns 0 on success, non-zero on error
  */
 int run_sequential_benchmarks(const Graph *g);
 
-#ifdef _OPENMP
+#if defined(_OPENMP) || defined(USE_CUDA)
 /**
  * Run all parallel connected components algorithms and compare with sequential
  * Returns 0 on success, non-zero on error
@@ -29,4 +33,8 @@ int run_pthreads_benchmarks(const Graph *g, int num_threads);
  * Returns 0 on success, non-zero on error
  */
 int run_mpi_benchmarks(const Graph *g);
+#endif
+
+#ifdef __cplusplus
+}
 #endif

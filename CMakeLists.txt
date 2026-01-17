@@ -223,3 +223,67 @@ else ()
     message(WARNING "MPI not found - cc_mpi target will not be built")
     message(STATUS "To install MPI on Ubuntu: sudo apt-get install libopenmpi-dev openmpi-bin")
 endif ()
+
+# CUDA/GPU parallel version
+include(CheckLanguage)
+check_language(CUDA)
+if(CMAKE_CUDA_COMPILER)
+    enable_language(CUDA)
+    message(STATUS "CUDA found: ${CMAKE_CUDA_COMPILER}")
+    message(STATUS "CUDA version: ${CMAKE_CUDA_COMPILER_VERSION}")
+
+    # Set CUDA standard and architecture
+    set(CMAKE_CUDA_STANDARD 11)
+    set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+
+    # Auto-detect GPU architecture or use common architectures
+    # For Pascal (GTX 1000 series, Tesla P100): 60, 61
+    # For Volta (Tesla V100): 70
+    # For Turing (RTX 2000 series): 75
+    # For Ampere (RTX 3000 series, A100): 80, 86
+    # For Ada Lovelace (RTX 4000 series): 89
+    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+        set(CMAKE_CUDA_ARCHITECTURES 60 70 75 80 86)
+        message(STATUS "Using default CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
+    else()
+        message(STATUS "Using specified CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
+    endif()
+
+    # CUDA compiler flags
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler -Wall")
+    set(CMAKE_CUDA_FLAGS_RELEASE "-O3 -DNDEBUG")
+    set(CMAKE_CUDA_FLAGS_DEBUG "-g -G -O0 -DDEBUG")
+
+    # Include CUDA directory
+    include_directories(inc/cuda)
+
+    # CUDA parallel version
+    add_executable(cc_cuda
+            src/main.c
+            src/graph.c
+            src/mtx_reader.c
+            src/cc_common.c
+            src/cc_sequential.c
+            src/cuda/cc_cuda.cu
+            benchmarks/benchmark_sequential.c
+            benchmarks/benchmark_cuda.c
+    )
+
+    # Set CUDA properties for the target
+    set_target_properties(cc_cuda PROPERTIES
+            CUDA_SEPARABLE_COMPILATION ON
+            CUDA_RESOLVE_DEVICE_SYMBOLS ON
+    )
+
+    # Link CUDA runtime and math library
+    target_link_libraries(cc_cuda m cudart)
+
+    # Add CUDA-specific define
+    target_compile_definitions(cc_cuda PRIVATE USE_CUDA)
+
+    message(STATUS "CUDA target configured: cc_cuda")
+else()
+    message(WARNING "CUDA not found - cc_cuda target will not be built")
+    message(STATUS "To install CUDA on Ubuntu: sudo apt-get install nvidia-cuda-toolkit")
+    message(STATUS "Or download from: https://developer.nvidia.com/cuda-downloads")
+endif()

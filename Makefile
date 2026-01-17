@@ -1,7 +1,7 @@
 # Makefile for Parallel Connected Components
 # Provides simple interface for building all targets
 
-.PHONY: all clean sequential openmp pthreads opencilk mpi test help
+.PHONY: all clean sequential openmp pthreads opencilk mpi cuda test help
 
 # Default target
 all: sequential openmp pthreads mpi
@@ -13,6 +13,9 @@ all: sequential openmp pthreads mpi
 	@echo "  build/cc_openmp     - OpenMP parallel implementation"
 	@echo "  build/cc_pthreads   - PThreads work-stealing implementation"
 	@echo "  build/cc_mpi        - MPI distributed memory implementation"
+	@echo ""
+	@echo "To build CUDA/GPU version:"
+	@echo "  make cuda"
 	@echo ""
 	@echo "To build OpenCilk version:"
 	@echo "  make opencilk"
@@ -29,6 +32,22 @@ sequential openmp pthreads mpi: build
 	@echo "Building standard targets (Sequential, OpenMP, PThreads, MPI)..."
 	cmake -B build -DCMAKE_BUILD_TYPE=Release
 	cmake --build build -j$(shell nproc)
+
+# CUDA build (requires NVIDIA CUDA toolkit)
+cuda: build
+	@echo "Building CUDA/GPU target..."
+	@if ! command -v nvcc > /dev/null 2>&1; then \
+		echo "ERROR: CUDA compiler (nvcc) not found"; \
+		echo "Please install NVIDIA CUDA toolkit first."; \
+		echo "Ubuntu/Debian: sudo apt-get install nvidia-cuda-toolkit"; \
+		echo "Or download from: https://developer.nvidia.com/cuda-downloads"; \
+		exit 1; \
+	fi
+	cmake -B build -DCMAKE_BUILD_TYPE=Release
+	cmake --build build --target cc_cuda -j$(shell nproc)
+	@echo ""
+	@echo "CUDA executable built: build/cc_cuda"
+	@echo "To run: ./build/cc_cuda data/graph.mtx"
 
 # OpenCilk build (requires OpenCilk compiler)
 opencilk:
@@ -101,6 +120,7 @@ help:
 	@echo "  make openmp          - Build only OpenMP version"
 	@echo "  make pthreads        - Build only PThreads version"
 	@echo "  make mpi             - Build only MPI version"
+	@echo "  make cuda            - Build CUDA/GPU version (requires CUDA toolkit)"
 	@echo "  make opencilk        - Build OpenCilk version (requires OpenCilk compiler)"
 	@echo "  make test            - Run correctness tests"
 	@echo "  make benchmark       - Run performance benchmarks"
@@ -111,14 +131,19 @@ help:
 	@echo "  - CMake 3.19.2+"
 	@echo "  - GCC 11.4+ (with OpenMP support)"
 	@echo "  - MPI implementation (OpenMPI or MPICH)"
+	@echo "  - NVIDIA CUDA toolkit (optional, for cuda target)"
 	@echo "  - OpenCilk (optional, for opencilk target)"
 	@echo ""
-	@echo "MPI Installation:"
-	@echo "  Ubuntu/Debian: sudo apt-get install libopenmpi-dev openmpi-bin"
-	@echo "  Fedora/RHEL:   sudo dnf install openmpi-devel"
+	@echo "Installation:"
+	@echo "  MPI (Ubuntu/Debian):  sudo apt-get install libopenmpi-dev openmpi-bin"
+	@echo "  MPI (Fedora/RHEL):    sudo dnf install openmpi-devel"
+	@echo "  CUDA (Ubuntu/Debian): sudo apt-get install nvidia-cuda-toolkit"
+	@echo "  CUDA (Download):      https://developer.nvidia.com/cuda-downloads"
 	@echo ""
 	@echo "Examples:"
 	@echo "  make && make test                      # Build and test"
 	@echo "  make benchmark                          # Run performance tests"
+	@echo "  make cuda                               # Build GPU version"
 	@echo "  ./build/cc_sequential data/graph.mtx   # Run sequential on custom graph"
+	@echo "  ./build/cc_cuda data/graph.mtx         # Run CUDA on custom graph"
 	@echo "  mpirun -np 4 ./build/cc_mpi data/graph.mtx  # Run MPI with 4 processes"

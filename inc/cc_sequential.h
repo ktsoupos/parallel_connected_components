@@ -1,6 +1,11 @@
 #pragma once
 
+#include "cc_common.h"
 #include "graph.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 typedef struct {
     int32_t *labels;        // Label for each vertex
@@ -43,3 +48,7 @@ void cc_result_destroy(CCResult *result);
  * Print connected components statistics
  */
 void cc_result_print_stats(const CCResult *result, const Graph *g);
+
+#ifdef __cplusplus
+}
+#endif

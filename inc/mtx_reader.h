@@ -2,6 +2,10 @@
 
 #include "graph.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /**
  * Read a graph from a Matrix Market (.mtx) file
  *
@@ -25,3 +29,7 @@ Graph *read_mtx_file(const char *filename);
  * Returns: Graph pointer on success, NULL on failure
  */
 Graph *read_mtx_file_verbose(const char *filename, int32_t report_interval);
+
+#ifdef __cplusplus
+}
+#endif

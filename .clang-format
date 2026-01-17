@@ -1,0 +1,29 @@
+---
+BasedOnStyle: LLVM
+IndentWidth: 4
+ColumnLimit: 100
+
+# Brace style: keep opening brace on same line (K&R style)
+BreakBeforeBraces: Attach
+
+# Pointer and reference alignment
+PointerAlignment: Right
+ReferenceAlignment: Right
+
+# Indentation
+IndentCaseLabels: false
+IndentPPDirectives: AfterHash
+
+# Spacing
+SpaceAfterCStyleCast: false
+SpaceBeforeParens: ControlStatements
+SpacesInParentheses: false
+
+# Function formatting
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+
+# Other settings
+AlignConsecutiveAssignments: false
+AlignConsecutiveDeclarations: false
