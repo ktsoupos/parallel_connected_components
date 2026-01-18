@@ -374,6 +374,216 @@ void ecl_flatten(const int nodes, int32_t* const __restrict__ nstat)
     }
 }
 
+/* ========================================================================
+ * Afforest Algorithm Kernels
+ * Based on: Sutton, Ben-Nun, Hoefler, "Optimizing Parallel Graph Connectivity
+ * Computation via Subgraph Sampling", IPDPS 2018
+ * ======================================================================== */
+
+#define AFFOREST_SAMPLE_SIZE 2  /* Number of neighbors to sample per vertex */
+
+/* Afforest: Find representative with path compression */
+static inline __device__ int afforest_find(int v, int32_t* const __restrict__ labels)
+{
+    int curr = v;
+    while (curr != labels[curr]) {
+        int next = labels[curr];
+        /* Path compression: shortcut to grandparent */
+        labels[curr] = labels[next];
+        curr = next;
+    }
+    return curr;
+}
+
+/* Afforest: Union operation - link two trees */
+static inline __device__ void afforest_unite(int u, int v, int32_t* const __restrict__ labels)
+{
+    int root_u = afforest_find(u, labels);
+    int root_v = afforest_find(v, labels);
+
+    while (root_u != root_v) {
+        /* Always link higher-numbered root to lower */
+        int high = root_u > root_v ? root_u : root_v;
+        int low = root_u < root_v ? root_u : root_v;
+
+        /* Try to update the parent of high to low */
+        if (atomicCAS(&labels[high], high, low) == high) {
+            break;  /* Success */
+        }
+        /* CAS failed, re-find roots */
+        root_u = afforest_find(u, labels);
+        root_v = afforest_find(v, labels);
+    }
+}
+
+/* Afforest Phase 1: Sampling - process first k neighbors for all vertices */
+static __global__ void afforest_sample_kernel(
+    const int nodes,
+    const int32_t* const __restrict__ row_ptr,
+    const int32_t* const __restrict__ col_idx,
+    int32_t* const __restrict__ labels,
+    const int sample_size)
+{
+    const int from = threadIdx.x + blockIdx.x * blockDim.x;
+    const int incr = gridDim.x * blockDim.x;
+
+    for (int v = from; v < nodes; v += incr) {
+        const int beg = __ldg(&row_ptr[v]);
+        const int end = __ldg(&row_ptr[v + 1]);
+        const int deg = end - beg;
+
+        /* Process at most sample_size neighbors */
+        const int limit = min(deg, sample_size);
+        for (int i = 0; i < limit; i++) {
+            const int neighbor = __ldg(&col_idx[beg + i]);
+            afforest_unite(v, neighbor, labels);
+        }
+    }
+}
+
+/* Afforest: Compress all paths to roots */
+static __global__ void afforest_compress_kernel(
+    const int nodes,
+    int32_t* const __restrict__ labels)
+{
+    const int from = threadIdx.x + blockIdx.x * blockDim.x;
+    const int incr = gridDim.x * blockDim.x;
+
+    for (int v = from; v < nodes; v += incr) {
+        /* Find root and compress path */
+        int root = v;
+        while (root != labels[root]) {
+            root = labels[root];
+        }
+        /* Point directly to root */
+        if (labels[v] != root) {
+            labels[v] = root;
+        }
+    }
+}
+
+/* Afforest Phase 2: Link remaining edges for large-component vertices only */
+static __global__ void afforest_link_kernel(
+    const int nodes,
+    const int32_t* const __restrict__ row_ptr,
+    const int32_t* const __restrict__ col_idx,
+    int32_t* const __restrict__ labels,
+    const int sample_size,
+    const int32_t skip_component)  /* Skip vertices belonging to largest component */
+{
+    const int from = threadIdx.x + blockIdx.x * blockDim.x;
+    const int incr = gridDim.x * blockDim.x;
+
+    for (int v = from; v < nodes; v += incr) {
+        /* Skip if this vertex is in the large component */
+        if (labels[v] == skip_component) {
+            continue;
+        }
+
+        const int beg = __ldg(&row_ptr[v]);
+        const int end = __ldg(&row_ptr[v + 1]);
+
+        /* Process remaining edges (skip first sample_size) */
+        for (int i = beg + sample_size; i < end; i++) {
+            const int neighbor = __ldg(&col_idx[i]);
+            /* Skip if neighbor is in the large component */
+            if (labels[neighbor] != skip_component) {
+                afforest_unite(v, neighbor, labels);
+            }
+        }
+    }
+}
+
+/* Afforest: Link ALL remaining edges (when no large component found) */
+static __global__ void afforest_link_all_kernel(
+    const int nodes,
+    const int32_t* const __restrict__ row_ptr,
+    const int32_t* const __restrict__ col_idx,
+    int32_t* const __restrict__ labels,
+    const int sample_size)
+{
+    const int from = threadIdx.x + blockIdx.x * blockDim.x;
+    const int incr = gridDim.x * blockDim.x;
+
+    for (int v = from; v < nodes; v += incr) {
+        const int beg = __ldg(&row_ptr[v]);
+        const int end = __ldg(&row_ptr[v + 1]);
+
+        /* Process remaining edges (skip first sample_size already processed) */
+        for (int i = beg + sample_size; i < end; i++) {
+            const int neighbor = __ldg(&col_idx[i]);
+            afforest_unite(v, neighbor, labels);
+        }
+    }
+}
+
+/* Kernel to find the most frequent component (largest component) using atomics */
+static __global__ void afforest_find_largest_kernel(
+    const int nodes,
+    const int32_t* const __restrict__ labels,
+    int32_t* const __restrict__ component_counts,
+    const int max_components)
+{
+    const int from = threadIdx.x + blockIdx.x * blockDim.x;
+    const int incr = gridDim.x * blockDim.x;
+
+    for (int v = from; v < nodes; v += incr) {
+        const int32_t comp = labels[v];
+        if (comp < max_components) {
+            atomicAdd(&component_counts[comp], 1);
+        }
+    }
+}
+
+/* Kernel to find max in component_counts array */
+static __global__ void afforest_reduce_max_kernel(
+    const int32_t* const __restrict__ counts,
+    const int n,
+    int32_t* __restrict__ max_comp,
+    int32_t* __restrict__ max_count)
+{
+    __shared__ int32_t s_max_comp[256];
+    __shared__ int32_t s_max_count[256];
+
+    const int tid = threadIdx.x;
+    const int from = threadIdx.x + blockIdx.x * blockDim.x;
+    const int incr = gridDim.x * blockDim.x;
+
+    int32_t local_max_count = 0;
+    int32_t local_max_comp = -1;
+
+    for (int i = from; i < n; i += incr) {
+        int32_t c = counts[i];
+        if (c > local_max_count) {
+            local_max_count = c;
+            local_max_comp = i;
+        }
+    }
+
+    s_max_comp[tid] = local_max_comp;
+    s_max_count[tid] = local_max_count;
+    __syncthreads();
+
+    /* Reduction in shared memory */
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            if (s_max_count[tid + s] > s_max_count[tid]) {
+                s_max_count[tid] = s_max_count[tid + s];
+                s_max_comp[tid] = s_max_comp[tid + s];
+            }
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        atomicMax(max_count, s_max_count[0]);
+        /* Store the component ID if this block found the max */
+        if (s_max_count[0] == *max_count) {
+            *max_comp = s_max_comp[0];
+        }
+    }
+}
+
 CCResult *cc_cuda(const Graph *restrict g) {
     if (g == NULL) {
         fprintf(stderr, "Error: NULL graph pointer\n");
@@ -512,6 +722,14 @@ int32_t count_components(const int32_t *labels, int32_t n) {
     return count;
 }
 
+void cc_cuda_result_destroy(CCResult *result) {
+    if (result == NULL) {
+        return;
+    }
+    free(result->labels);
+    free(result);
+}
+
 CCResult *cc_cuda_ecl(const Graph *restrict g) {
     if (g == NULL) {
         fprintf(stderr, "Error: NULL graph pointer\n");
@@ -611,6 +829,139 @@ CCResult *cc_cuda_ecl(const Graph *restrict g) {
 
     /* Cleanup device memory */
     cudaFree(d_worklist);
+    cudaFree(d_labels);
+    cudaFree(d_col_idx);
+    cudaFree(d_row_ptr);
+
+    return result;
+}
+
+CCResult *cc_cuda_afforest(const Graph *restrict g) {
+    if (g == NULL) {
+        fprintf(stderr, "Error: NULL graph pointer\n");
+        return NULL;
+    }
+
+    const int32_t num_vertices = graph_get_num_vertices(g);
+    const int32_t num_edges = graph_get_num_edges(g);
+    const int32_t total_edges = 2 * num_edges;
+
+    if (num_vertices <= 0) {
+        fprintf(stderr, "Error: Invalid number of vertices\n");
+        return NULL;
+    }
+
+    printf("Running Afforest CUDA on %d vertices, %d edges\n", num_vertices, num_edges);
+
+    /* Allocate result structure */
+    CCResult *result = (CCResult *)malloc(sizeof(CCResult));
+    if (result == NULL) {
+        fprintf(stderr, "Error: Failed to allocate CCResult\n");
+        return NULL;
+    }
+
+    result->labels = (int32_t *)malloc(sizeof(int32_t) * num_vertices);
+    if (result->labels == NULL) {
+        fprintf(stderr, "Error: Failed to allocate labels array\n");
+        free(result);
+        return NULL;
+    }
+
+    /* Get device properties */
+    cudaDeviceProp deviceProp;
+    cudaGetDeviceProperties(&deviceProp, 0);
+    const int SMs = deviceProp.multiProcessorCount;
+    const int mTSM = deviceProp.maxThreadsPerMultiProcessor;
+    printf("Afforest using GPU: %s with %d SMs\n", deviceProp.name, SMs);
+
+    /* Allocate device memory */
+    int32_t *d_row_ptr = NULL;
+    int32_t *d_col_idx = NULL;
+    int32_t *d_labels = NULL;
+    int32_t *d_comp_counts = NULL;
+    int32_t *d_max_comp = NULL;
+    int32_t *d_max_count = NULL;
+
+    CUDA_CHECK(cudaMalloc((void **)&d_row_ptr, sizeof(int32_t) * (num_vertices + 1)));
+    CUDA_CHECK(cudaMalloc((void **)&d_col_idx, sizeof(int32_t) * total_edges));
+    CUDA_CHECK(cudaMalloc((void **)&d_labels, sizeof(int32_t) * num_vertices));
+    CUDA_CHECK(cudaMalloc((void **)&d_comp_counts, sizeof(int32_t) * num_vertices));
+    CUDA_CHECK(cudaMalloc((void **)&d_max_comp, sizeof(int32_t)));
+    CUDA_CHECK(cudaMalloc((void **)&d_max_count, sizeof(int32_t)));
+
+    /* Copy graph data to device */
+    CUDA_CHECK(cudaMemcpy(d_row_ptr, g->row_ptr, sizeof(int32_t) * (num_vertices + 1), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_col_idx, g->col_idx, sizeof(int32_t) * total_edges, cudaMemcpyHostToDevice));
+
+    /* Initialize labels: label[v] = v */
+    const int blocks = SMs * mTSM / BLOCK_SIZE;
+    init_labels_kernel<<<blocks, BLOCK_SIZE>>>(d_labels, num_vertices);
+    CUDA_CHECK(cudaGetLastError());
+
+    /* Phase 1: Sampling - process first AFFOREST_SAMPLE_SIZE neighbors */
+    afforest_sample_kernel<<<blocks, BLOCK_SIZE>>>(
+        num_vertices, d_row_ptr, d_col_idx, d_labels, AFFOREST_SAMPLE_SIZE);
+    CUDA_CHECK(cudaGetLastError());
+
+    /* Compress paths after sampling */
+    afforest_compress_kernel<<<blocks, BLOCK_SIZE>>>(num_vertices, d_labels);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    /* Find largest component to potentially skip in Phase 2 */
+    CUDA_CHECK(cudaMemset(d_comp_counts, 0, sizeof(int32_t) * num_vertices));
+    int32_t h_max_comp = -1;
+    int32_t h_max_count = 0;
+    CUDA_CHECK(cudaMemcpy(d_max_comp, &h_max_comp, sizeof(int32_t), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_max_count, &h_max_count, sizeof(int32_t), cudaMemcpyHostToDevice));
+
+    /* Count vertices in each component */
+    afforest_find_largest_kernel<<<blocks, BLOCK_SIZE>>>(
+        num_vertices, d_labels, d_comp_counts, num_vertices);
+    CUDA_CHECK(cudaGetLastError());
+
+    /* Find the largest component */
+    afforest_reduce_max_kernel<<<blocks, 256>>>(
+        d_comp_counts, num_vertices, d_max_comp, d_max_count);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    CUDA_CHECK(cudaMemcpy(&h_max_comp, d_max_comp, sizeof(int32_t), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(&h_max_count, d_max_count, sizeof(int32_t), cudaMemcpyDeviceToHost));
+
+    /* Phase 2: Process remaining edges */
+    /* Threshold: skip large component optimization if it contains > 50% of vertices */
+    const float large_threshold = 0.5f;
+    const bool has_large_component = (h_max_count > (int32_t)(num_vertices * large_threshold));
+
+    if (has_large_component && h_max_comp >= 0) {
+        /* Skip vertices in the largest component */
+        afforest_link_kernel<<<blocks, BLOCK_SIZE>>>(
+            num_vertices, d_row_ptr, d_col_idx, d_labels, AFFOREST_SAMPLE_SIZE, h_max_comp);
+    } else {
+        /* No dominant large component, process all remaining edges */
+        afforest_link_all_kernel<<<blocks, BLOCK_SIZE>>>(
+            num_vertices, d_row_ptr, d_col_idx, d_labels, AFFOREST_SAMPLE_SIZE);
+    }
+    CUDA_CHECK(cudaGetLastError());
+
+    /* Final path compression */
+    afforest_compress_kernel<<<blocks, BLOCK_SIZE>>>(num_vertices, d_labels);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    /* Copy results back to host */
+    CUDA_CHECK(cudaMemcpy(result->labels, d_labels, sizeof(int32_t) * num_vertices, cudaMemcpyDeviceToHost));
+
+    /* Count components */
+    result->num_components = count_components(result->labels, num_vertices);
+    result->num_iterations = 2; /* Afforest has 2 phases */
+    printf("Found %d connected components\n", result->num_components);
+
+    /* Cleanup */
+    cudaFree(d_max_count);
+    cudaFree(d_max_comp);
+    cudaFree(d_comp_counts);
     cudaFree(d_labels);
     cudaFree(d_col_idx);
     cudaFree(d_row_ptr);

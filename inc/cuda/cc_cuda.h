@@ -59,8 +59,32 @@ CCResult *cc_cuda(const Graph *restrict g);
  */
 CCResult *cc_cuda_ecl(const Graph *restrict g);
 
+/**
+ * Afforest: Sampling-based Connected Components for GPUs
+ * Based on Sutton, Ben-Nun, Hoefler, IPDPS 2018
+ *
+ * Two-phase algorithm:
+ * - Phase 1: Sample first k neighbors per vertex (quick connectivity)
+ * - Phase 2: Process remaining edges, skipping large components
+ *
+ * Best for graphs where sampling quickly connects most vertices
+ * (e.g., social networks, power-law graphs)
+ *
+ * @param g Input graph (CSR format)
+ * @return CCResult containing labels, component count, and iteration count
+ */
+CCResult *cc_cuda_afforest(const Graph *restrict g);
+
 /* Count unique components from labels */
 int32_t count_components(const int32_t *labels, int32_t n);
+
+/**
+ * Destroy CCResult allocated by CUDA functions
+ * Properly handles pinned memory allocated by cudaHostAlloc
+ *
+ * @param result CCResult to destroy (may have pinned memory)
+ */
+void cc_cuda_result_destroy(CCResult *result);
 
 #ifdef __cplusplus
 }
