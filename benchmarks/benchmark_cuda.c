@@ -63,30 +63,40 @@ int run_parallel_benchmarks(const Graph* g, int num_threads) {
     printf("CUDA LP completed in %.5f seconds\n", elapsed_cuda);
     cc_result_print_stats(result_cuda, g);
 
+    /* Run ECL-CC algorithm */
+    printf("\n=== CUDA ECL-CC ===\n");
+    const double start_ecl = get_wall_time();
+    CCResult* result_ecl = cc_cuda_ecl(g);
+    const double end_ecl = get_wall_time();
+
+    if (result_ecl == NULL) {
+        fprintf(stderr, "Error: ECL-CC algorithm failed\n");
+        cc_result_destroy(result_seq);
+        cc_result_destroy(result_cuda);
+        return -1;
+    }
+
+    const double elapsed_ecl = end_ecl - start_ecl;
+    printf("ECL-CC completed in %.5f seconds\n", elapsed_ecl);
+    cc_result_print_stats(result_ecl, g);
+
     /* Verify correctness: compare component counts */
     printf("\n=== Correctness Verification ===\n");
+
+    /* Verify CUDA LP */
     if (result_seq->num_components == result_cuda->num_components) {
-        printf("Component counts MATCH: %d components\n", result_seq->num_components);
-
-        /* Verify labels produce same components */
-        bool labels_match = true;
-        for (int32_t i = 0; i < num_vertices; i++) {
-            /* Note: Labels may differ but represent the same components */
-            if (result_seq->labels[i] != result_cuda->labels[i]) {
-                labels_match = false;
-                break;
-            }
-        }
-
-        if (labels_match) {
-            printf("Labels EXACTLY MATCH\n");
-        } else {
-            printf("Labels differ but produce same components (VALID)\n");
-        }
+        printf("CUDA LP: Component counts MATCH (%d components)\n", result_seq->num_components);
     } else {
-        printf("WARNING: Component counts DIFFER\n");
-        printf("  Sequential: %d components\n", result_seq->num_components);
-        printf("  CUDA:       %d components\n", result_cuda->num_components);
+        printf("WARNING: CUDA LP component counts DIFFER\n");
+        printf("  Sequential: %d, CUDA LP: %d\n", result_seq->num_components, result_cuda->num_components);
+    }
+
+    /* Verify ECL-CC */
+    if (result_seq->num_components == result_ecl->num_components) {
+        printf("ECL-CC:  Component counts MATCH (%d components)\n", result_seq->num_components);
+    } else {
+        printf("WARNING: ECL-CC component counts DIFFER\n");
+        printf("  Sequential: %d, ECL-CC: %d\n", result_seq->num_components, result_ecl->num_components);
     }
 
     /* Print performance comparison */
@@ -94,16 +104,26 @@ int run_parallel_benchmarks(const Graph* g, int num_threads) {
     printf("Sequential (UF edge reorder): %.5f seconds\n", elapsed_seq);
     printf("CUDA (Label Propagation):     %.5f seconds (%d iterations)\n",
            elapsed_cuda, result_cuda->num_iterations);
+    printf("CUDA (ECL-CC):                %.5f seconds\n", elapsed_ecl);
 
-    /* Compute and print speedup */
+    /* Compute and print speedups */
+    printf("\n=== Speedup vs Sequential ===\n");
     if (elapsed_seq > 0.0) {
-        const double speedup = elapsed_seq / elapsed_cuda;
-        printf("\nSpeedup vs sequential: %.2fx\n", speedup);
+        const double speedup_cuda = elapsed_seq / elapsed_cuda;
+        const double speedup_ecl = elapsed_seq / elapsed_ecl;
+        printf("CUDA LP:  %.2fx\n", speedup_cuda);
+        printf("ECL-CC:   %.2fx\n", speedup_ecl);
+
+        if (elapsed_cuda > 0.0) {
+            const double ecl_vs_lp = elapsed_cuda / elapsed_ecl;
+            printf("\nECL-CC vs CUDA LP: %.2fx\n", ecl_vs_lp);
+        }
     }
 
     /* Cleanup */
     cc_result_destroy(result_seq);
     cc_result_destroy(result_cuda);
+    cc_result_destroy(result_ecl);
 
     return 0;
 }
