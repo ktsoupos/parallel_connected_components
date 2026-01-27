@@ -4,6 +4,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /*
  * Graph stored in Compressed Sparse Row (CSR) format
  * Efficient for sparse graphs and parallel processing
@@ -72,3 +76,7 @@ const int32_t *graph_get_neighbors(const Graph *g, int32_t v, int32_t *num_neigh
  * Print graph statistics
  */
 void graph_print_stats(const Graph *g);
+
+#ifdef __cplusplus
+}
+#endif

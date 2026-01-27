@@ -15,6 +15,10 @@
 #    include "cc_openmp.h"
 #endif
 
+#ifdef USE_CUDA
+#    include "cc_cuda.h"
+#endif
+
 #ifdef __cilk
 #    include "benchmark_opencilk.h"
 #    include <cilk/cilk.h>
@@ -95,6 +99,8 @@ int main(int argc, char **argv) {
     if (rank == 0) {
         printf("Running with %d ranks\n", world_size);
     }
+#elif defined(USE_CUDA)
+    printf("=== Connected Components - CUDA/GPU Parallel Version ===\n\n");
 #elif defined(__cilk)
     printf("=== Connected Components - OpenCilk Parallel Version ===\n\n");
 #elif defined(_OPENMP)
@@ -132,6 +138,13 @@ int main(int argc, char **argv) {
             graph_destroy(g);
         }
         MPI_Finalize();
+        return EXIT_FAILURE;
+    }
+#elif defined(USE_CUDA)
+    /* Run CUDA/GPU parallel benchmarks */
+    const int result = run_parallel_benchmarks(g, 0);  /* num_threads is ignored for CUDA */
+    if (result != 0) {
+        graph_destroy(g);
         return EXIT_FAILURE;
     }
 #elif defined(__cilk)
