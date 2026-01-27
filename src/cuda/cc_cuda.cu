@@ -462,7 +462,7 @@ static __global__ void afforest_compress_kernel(
     }
 }
 
-/* Afforest Phase 2: Link remaining edges for large-component vertices only */
+/* Afforest Phase 2: Link remaining edges, skipping vertices already in large component */
 static __global__ void afforest_link_kernel(
     const int nodes,
     const int32_t* const __restrict__ row_ptr,
@@ -475,7 +475,7 @@ static __global__ void afforest_link_kernel(
     const int incr = gridDim.x * blockDim.x;
 
     for (int v = from; v < nodes; v += incr) {
-        /* Skip if this vertex is in the large component */
+        /* Skip if this vertex is already in the large component (optimization) */
         if (labels[v] == skip_component) {
             continue;
         }
@@ -486,10 +486,8 @@ static __global__ void afforest_link_kernel(
         /* Process remaining edges (skip first sample_size) */
         for (int i = beg + sample_size; i < end; i++) {
             const int neighbor = __ldg(&col_idx[i]);
-            /* Skip if neighbor is in the large component */
-            if (labels[neighbor] != skip_component) {
-                afforest_unite(v, neighbor, labels);
-            }
+            /* Unite with ALL neighbors, including those in large component */
+            afforest_unite(v, neighbor, labels);
         }
     }
 }
